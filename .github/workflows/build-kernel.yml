@@ -45,11 +45,10 @@ jobs:
           set -euo pipefail
           targets=()
           if [[ "${{ github.event.inputs.build_ksun }}" == "true" ]]; then targets+=("ksun"); fi
-            if [[ "${{ github.event.inputs.build_ksun_old }}" == "true" ]]; then targets+=("ksun-old"); fi
+          if [[ "${{ github.event.inputs.build_ksun_old }}" == "true" ]]; then targets+=("ksun-old"); fi
           if [[ "${{ github.event.inputs.build_suki }}" == "true" ]]; then targets+=("suki"); fi
           if [[ "${{ github.event.inputs.build_suki_old }}" == "true" ]]; then targets+=("suki-old"); fi
 
-          # Build JSON object: { "target": ["a","b",...] }
           json=$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s '{target: .}')
           echo "matrix<<EOF" >> "$GITHUB_OUTPUT"
           echo "$json" >> "$GITHUB_OUTPUT"
@@ -70,7 +69,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Maximize build space
-      # set REMOVE_UNUSED_PACKAGES=true in a config env file if desired
         if: env.REMOVE_UNUSED_PACKAGES == 'true'
         uses: easimon/maximize-build-space@master
         with:
@@ -126,21 +124,21 @@ jobs:
         if: env.ENABLE_PYTHON2 == 'true'
         shell: bash
         run: |
-            set -euo pipefail
-            mkdir -p ~/python2-jammy && cd ~/python2-jammy
-            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
-            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
-            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-stdlib_2.7.18-13ubuntu1.5_amd64.deb
-            wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7_2.7.18-13ubuntu1.5_amd64.deb
-            sudo apt-get install -y libnsl2
-            sudo dpkg -i libpython2.7-minimal_*.deb
-            sudo dpkg -i python2.7-minimal_*.deb
-            sudo dpkg -i libpython2.7-stdlib_*.deb
-            sudo dpkg -i python2.7_*.deb
-            sudo apt-get -f install -y
-            sudo ln -sf /usr/bin/python2.7 /usr/local/bin/python2
-            cd ~
-            rm -rf ~/python2-jammy
+          set -euo pipefail
+          mkdir -p ~/python2-jammy && cd ~/python2-jammy
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-stdlib_2.7.18-13ubuntu1.5_amd64.deb
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7_2.7.18-13ubuntu1.5_amd64.deb
+          sudo apt-get install -y libnsl2
+          sudo dpkg -i libpython2.7-minimal_*.deb
+          sudo dpkg -i python2.7-minimal_*.deb
+          sudo dpkg -i libpython2.7-stdlib_*.deb
+          sudo dpkg -i python2.7_*.deb
+          sudo apt-get -f install -y
+          sudo ln -sf /usr/bin/python2.7 /usr/local/bin/python2
+          cd ~
+          rm -rf ~/python2-jammy
 
       - name: Download Clang
         if: env.USE_CLANG == 'true'
@@ -166,7 +164,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           download_toolchain() {
             local url="$1" output="$2"
-            wget -nv --timeout=120 --tries=5 --waitretry=10 -O "$output" "$url"               || curl -fL --retry 5 --retry-delay 10 --connect-timeout 60 -o "$output" "$url"
+            wget -nv --timeout=120 --tries=5 --waitretry=10 -O "$output" "$url" || curl -fL --retry 5 --retry-delay 10 --connect-timeout 60 -o "$output" "$url"
           }
           link_cross_prefix() {
             local dir="$1" from_prefix="$2" to_prefix="$3"
@@ -284,6 +282,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+          # KPM sembol tablosu icin zorunlu yapilandirma
+          echo "CONFIG_KALLSYMS=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+          echo "CONFIG_KALLSYMS_ALL=y" >> "arch/${{ env.KERNEL_ARCH }}/configs/${DEVICE}_defconfig"
+
           if [[ "${{ env.ENABLE_KERNELSU }}" == "true" ]]; then
             if [[ "${{ env.KSU_HOOKS_PATCH }}" == "true" ]]; then
               git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch"
@@ -397,6 +400,8 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           make ARCH="${{ env.KERNEL_ARCH }}" O=out "${DEVICE}_defconfig"
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
+          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
           make ARCH="${{ env.KERNEL_ARCH }}" O=out olddefconfig
           if [[ "${{ env.ENABLE_KERNELSU }}" == "true" ]]; then
             ./scripts/config --file out/.config --enable CONFIG_KSU
@@ -423,7 +428,6 @@ jobs:
             export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
             export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
           elif [[ "${{ env.USE_CLANG }}" == "true" ]]; then
-            # Add PATH for GCC binaries when using Clang
             export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
             if [[ "${{ env.USE_GCC_64 }}" == "true" || "${{ env.USE_GCC_32 }}" == "true" ]]; then
               export PATH="$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH"
@@ -436,7 +440,6 @@ jobs:
           else
             echo "Toolchain not selected"; exit 1
           fi
-          # config-*.env booleans (e.g. DISABLE_LTO=false) must not leak into kbuild.
           unset DISABLE_LTO DISABLE_CC_WERROR || true
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
@@ -479,15 +482,20 @@ jobs:
           OUT_BOOT="$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot"
           mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
           cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
-          wget -nv "${{ env.KPM_URL }}"
+          wget -nv -O patch_linux "${{ env.KPM_URL }}" || wget -nv "${{ env.KPM_URL }}"
           cp "$OUT_BOOT/Image" .
-          cp "$OUT_BOOT/dts/mediatek/mt6768.dtb" .
+          cp "$OUT_BOOT/dts/mediatek/mt6768.dtb" . 2>/dev/null || cp "$OUT_BOOT"/*.dtb . 2>/dev/null || true
           chmod +x patch_linux
           ./patch_linux
-          mv -f oImage Image
-          gzip -k Image
-          cat Image.gz *.dtb > Image.gz-dtb
-          mv -f Image.gz-dtb "$OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}"
+          if [[ -f oImage ]]; then
+            mv -f oImage Image
+            gzip -k -f Image
+            cat Image.gz *.dtb > Image.gz-dtb
+            mv -f Image.gz-dtb "$OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}"
+          else
+            echo "Error: patch_linux failed to produce oImage!"
+            exit 1
+          fi
 
       - name: Create flashable Anykernel3 zip
         if: env.CHECK_FILE_IS_OK == 'true' && env.USE_ANYKERNEL3 == 'true'
@@ -511,7 +519,11 @@ jobs:
             tar -C AnyKernel3/ -I zstd -xf AnyKernel3.tar.zst
             rm AnyKernel3.tar.zst
           elif [[ "${{ env.ANYKERNEL3_SOURCE }}" == *'.git' ]]; then
-            git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
+            AK3_BRANCH="${{ env.ANYKERNEL3_BRANCH }}"
+            [[ -z "$AK3_BRANCH" || "$AK3_BRANCH" == "Shockwave" ]] && AK3_BRANCH="master"
+            git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "$AK3_BRANCH" --depth=1 AnyKernel3 || \
+            git clone "${{ env.ANYKERNEL3_SOURCE }}" -b master --depth=1 AnyKernel3 || \
+            git clone "${{ env.ANYKERNEL3_SOURCE }}" --depth=1 AnyKernel3
           else
             wget -nv -O AnyKernel3.zip "${{ env.ANYKERNEL3_SOURCE }}"
             mkdir AnyKernel3
