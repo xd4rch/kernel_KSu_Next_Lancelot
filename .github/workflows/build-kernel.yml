@@ -108,7 +108,7 @@ jobs:
           python3 -c '
           import os, glob
 
-          # syscall_fn_t enjeksiyonu
+          # syscall_hook.h içine typedef enjeksiyonu
           hook_headers = glob.glob("**/hook/syscall_hook.h", recursive=True)
           patch_header = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n"
@@ -136,7 +136,7 @@ jobs:
                       f.write(patch_header + ac)
                   print("[OK] asm/syscall.h güncellendi.")
 
-          # MODULE_IMPORT_NS tanımı
+          # init.c içine MODULE_IMPORT_NS tanımı
           init_files = glob.glob("**/core/init.c", recursive=True)
           ns_patch = (
               "#ifndef MODULE_IMPORT_NS\n"
@@ -207,7 +207,7 @@ jobs:
                   f.write(compat_header + uc)
               print(f"[OK] util.h güncellendi: {util_h}")
 
-          # lsm_hook.c uyumluluğu (Manual Hooks devrede olduğu için stub haline getirilir)
+          # lsm_hook.c stub
           lsm_stub = (
               "#include <linux/types.h>\n"
               "int ksu_lsm_hook_init(void) { return 0; }\n"
@@ -217,6 +217,16 @@ jobs:
               with open(lsm_f, "w") as f:
                   f.write(lsm_stub)
               print(f"[OK] lsm_hook.c stub haline getirildi: {lsm_f}")
+
+          # syscall_event_bridge.c ve strncpy_from_user kullanan tüm C dosyalarına uaccess.h enjeksiyonu
+          all_c_files = glob.glob("drivers/kernelsu/**/*.c", recursive=True) + glob.glob("KernelSU/**/*.c", recursive=True)
+          for c_path in set(all_c_files):
+              with open(c_path, "r") as f:
+                  code = f.read()
+              if "strncpy_from_user" in code and "<linux/uaccess.h>" not in code:
+                  with open(c_path, "w") as f:
+                      f.write("#include <linux/uaccess.h>\n" + code)
+                  print(f"[OK] uaccess.h eklendi: {c_path}")
           '
 
       - name: Setup Configuration
