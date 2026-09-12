@@ -316,7 +316,7 @@ jobs:
                   with open(fw_file, "w") as f:
                       f.write(fw_header + "".join(new_lines))
 
-          # 7. include/linux/poll.h ve event_queue uyumluluğu (__poll_t ve EPOLL* bayrakları)
+          # include/linux/poll.h ve event_queue uyumluluğu
           poll_h = "include/linux/poll.h"
           if os.path.exists(poll_h):
               with open(poll_h, "r") as f:
@@ -331,7 +331,6 @@ jobs:
                   )
                   with open(poll_h, "a") as f:
                       f.write(ph_patch)
-                  print("[OK] include/linux/poll.h içine __poll_t eklendi.")
 
           eq_header = (
               "#ifndef _SUKISU_EVENT_QUEUE_4_14_\n"
@@ -359,7 +358,44 @@ jobs:
               if "_SUKISU_EVENT_QUEUE_4_14_" not in content:
                   with open(eq_file, "w") as f:
                       f.write(eq_header + content)
-                  print(f"[OK] event_queue uyarlandı: {eq_file}")
+
+          # 7. seccomp_cache.c ve asm/seccomp.h SECCOMP_ARCH_NATIVE_NR uyumluluğu
+          sc_header = (
+              "#ifndef _SUKISU_SECCOMP_CACHE_4_14_\n"
+              "#define _SUKISU_SECCOMP_CACHE_4_14_\n"
+              "#include <asm/unistd.h>\n"
+              "#ifndef SECCOMP_ARCH_NATIVE_NR\n"
+              "#ifdef __NR_syscalls\n"
+              "#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n"
+              "#else\n"
+              "#define SECCOMP_ARCH_NATIVE_NR 512\n"
+              "#endif\n"
+              "#endif\n"
+              "#ifndef SECCOMP_ARCH_COMPAT_NR\n"
+              "#ifdef __NR_compat_syscalls\n"
+              "#define SECCOMP_ARCH_COMPAT_NR __NR_compat_syscalls\n"
+              "#else\n"
+              "#define SECCOMP_ARCH_COMPAT_NR 400\n"
+              "#endif\n"
+              "#endif\n"
+              "#endif /* _SUKISU_SECCOMP_CACHE_4_14_ */\n\n"
+          )
+          for sc_file in get_unique_files("**/infra/seccomp_cache.*"):
+              with open(sc_file, "r") as f:
+                  content = f.read()
+              if "_SUKISU_SECCOMP_CACHE_4_14_" not in content:
+                  with open(sc_file, "w") as f:
+                      f.write(sc_header + content)
+                  print(f"[OK] seccomp_cache uyarlandı: {sc_file}")
+
+          asm_seccomp = "arch/arm64/include/asm/seccomp.h"
+          if os.path.exists(asm_seccomp):
+              with open(asm_seccomp, "r") as f:
+                  asc = f.read()
+              if "_SUKISU_SECCOMP_CACHE_4_14_" not in asc:
+                  with open(asm_seccomp, "a") as f:
+                      f.write("\n" + sc_header)
+                  print("[OK] asm/seccomp.h güncellendi.")
           '
 
       - name: Setup Configuration
