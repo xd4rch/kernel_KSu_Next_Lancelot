@@ -104,11 +104,11 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları: syscall_fn_t, MODULE_IMPORT_NS, access_ok, set_memory.h
+          # 6. Linux 4.14 Uyumluluk Yamaları (syscall_fn_t, MODULE_IMPORT_NS, access_ok, set_memory.h, pgtable.h)
           python3 -c '
           import os, glob
 
-          # syscall_hook.h dosyalarının en tepesine koşulsuz typedef enjeksiyonu
+          # syscall_hook.h içine typedef enjeksiyonu
           hook_headers = glob.glob("**/hook/syscall_hook.h", recursive=True)
           patch_header = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n"
@@ -125,9 +125,8 @@ jobs:
               if "_SUKISU_SYSCALL_FN_T_" not in content:
                   with open(h_path, "w") as f:
                       f.write(patch_header + content)
-                  print(f"[OK] syscall_fn_t basariyla enjekte edildi: {h_path}")
+                  print(f"[OK] syscall_fn_t eklendi: {h_path}")
 
-          # ARM64 asm/syscall.h başlığına da ekle
           asm_syscall = "arch/arm64/include/asm/syscall.h"
           if os.path.exists(asm_syscall):
               with open(asm_syscall, "r") as f:
@@ -135,7 +134,7 @@ jobs:
               if "_SUKISU_SYSCALL_FN_T_" not in ac:
                   with open(asm_syscall, "w") as f:
                       f.write(patch_header + ac)
-                  print("[OK] arch/arm64/include/asm/syscall.h guncellendi.")
+                  print("[OK] asm/syscall.h güncellendi.")
 
           # init.c içine MODULE_IMPORT_NS tanımı
           init_files = glob.glob("**/core/init.c", recursive=True)
@@ -166,13 +165,19 @@ jobs:
                           f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
                       else:
                           f.write(line)
-              print("[OK] uaccess.h access_ok uyumlulugu korundu.")
+              print("[OK] uaccess.h access_ok uyumluluğu korundu.")
 
-          # linux/set_memory.h oluştur
+          # linux/set_memory.h köprüsü
           if not os.path.exists("include/linux/set_memory.h"):
               with open("include/linux/set_memory.h", "w") as f:
                   f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
-              print("[OK] include/linux/set_memory.h korundu.")
+              print("[OK] include/linux/set_memory.h eklendi.")
+
+          # linux/pgtable.h köprüsü (Linux 5.8+ -> Linux 4.14 uyumluluğu)
+          if not os.path.exists("include/linux/pgtable.h"):
+              with open("include/linux/pgtable.h", "w") as f:
+                  f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
+              print("[OK] include/linux/pgtable.h eklendi.")
           '
 
       - name: Setup Configuration
@@ -215,7 +220,7 @@ jobs:
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama: SukiSU bayrağının silinmediğini kontrol et
+          # Doğrulama
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -271,7 +276,7 @@ jobs:
           # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Fiziksel boot adresi
+          # Kesinleşen fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
