@@ -16,7 +16,7 @@ device.name3=lancelot
 } # end properties
 
 # shell variables
-BLOCK=boot
+BLOCK=/dev/block/mmcblk0p34
 IS_SLOT_DEVICE=0
 RAMDISK_COMPRESSION=auto
 PATCH_VBMETA_FLAG=auto
