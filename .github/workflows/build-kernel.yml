@@ -567,15 +567,17 @@ jobs:
         if: env.CHECK_FILE_IS_OK == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ANDROID_TAG }}${{ env.KERNEL_LOCALVERSION }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          # İndireceğiniz ZIP dosyasının adı bu olacak:
+          name: SukiSU-Ultra-A13-perf-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/AnyKernel3/*
-
+      
       - name: Upload Kernel Image
         if: env.CHECK_FILE_IS_OK == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.KERNEL_IMAGE_NAME }}${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}
+          # Ham çekirdeğin adı bu olacak:
+          name: SukiSU-Ultra-Raw-Image.gz-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/Image.gz
 
       - name: Upload DTBO image
         if: env.CHECK_DTBO_IS_OK == 'true'
