@@ -108,8 +108,11 @@ jobs:
           python3 -c '
           import os, glob
 
+          # Tekilleştirme fonksiyonu (Symlink yinelenmesini önler)
+          def get_unique_files(pattern):
+              return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
+
           # syscall_hook.h içine typedef enjeksiyonu
-          hook_headers = glob.glob("**/hook/syscall_hook.h", recursive=True)
           patch_header = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n"
               "#define _SUKISU_SYSCALL_FN_T_\n"
@@ -119,7 +122,7 @@ jobs:
               "typedef long (*syscall_fn_t)(const struct pt_regs *);\n"
               "#endif /* _SUKISU_SYSCALL_FN_T_ */\n\n"
           )
-          for h_path in set(hook_headers):
+          for h_path in get_unique_files("**/hook/syscall_hook.h"):
               with open(h_path, "r") as f:
                   content = f.read()
               if "_SUKISU_SYSCALL_FN_T_" not in content:
@@ -135,13 +138,12 @@ jobs:
                       f.write(patch_header + ac)
 
           # init.c içine MODULE_IMPORT_NS tanımı
-          init_files = glob.glob("**/core/init.c", recursive=True)
           ns_patch = (
               "#ifndef MODULE_IMPORT_NS\n"
               "#define MODULE_IMPORT_NS(ns)\n"
               "#endif\n\n"
           )
-          for i_path in set(init_files):
+          for i_path in get_unique_files("**/core/init.c"):
               with open(i_path, "r") as f:
                   content = f.read()
               if "MODULE_IMPORT_NS" not in content or "#define MODULE_IMPORT_NS" not in content:
@@ -184,7 +186,7 @@ jobs:
               "#define ksys_close sys_close\n"
               "#endif\n\n"
           )
-          for su_file in glob.glob("**/feature/sucompat.c", recursive=True):
+          for su_file in get_unique_files("**/feature/sucompat.c"):
               with open(su_file, "r") as f:
                   sc = f.read()
               sc = sc.replace("strncpy_from_user_nofault", "strncpy_from_user")
@@ -192,7 +194,7 @@ jobs:
               with open(su_file, "w") as f:
                   f.write(compat_header + sc)
 
-          for util_h in glob.glob("**/include/util.h", recursive=True):
+          for util_h in get_unique_files("**/include/util.h"):
               with open(util_h, "r") as f:
                   uc = f.read()
               uc = uc.replace("ksys_close", "sys_close")
@@ -205,13 +207,13 @@ jobs:
               "int ksu_lsm_hook_init(void) { return 0; }\n"
               "void ksu_lsm_hook_exit(void) {}\n"
           )
-          for lsm_f in glob.glob("**/hook/lsm_hook.c", recursive=True):
+          for lsm_f in get_unique_files("**/hook/lsm_hook.c"):
               with open(lsm_f, "w") as f:
                   f.write(lsm_stub)
 
           # strncpy_from_user için uaccess.h enjeksiyonu
-          all_c_files = glob.glob("drivers/kernelsu/**/*.c", recursive=True) + glob.glob("KernelSU/**/*.c", recursive=True)
-          for c_path in set(all_c_files):
+          all_c_files = get_unique_files("drivers/kernelsu/**/*.c") | get_unique_files("KernelSU/**/*.c")
+          for c_path in all_c_files:
               with open(c_path, "r") as f:
                   code = f.read()
               if "strncpy_from_user" in code and "<linux/uaccess.h>" not in code:
@@ -230,7 +232,7 @@ jobs:
               "#define copy_to_kernel_nofault probe_kernel_write\n"
               "#endif\n\n"
           )
-          for pm_file in glob.glob("**/hook/arm64/patch_memory.c", recursive=True):
+          for pm_file in get_unique_files("**/hook/arm64/patch_memory.c"):
               with open(pm_file, "r") as f:
                   pm_code = f.read()
               pm_code = pm_code.replace("__flush_icache_range", "flush_icache_range")
@@ -238,21 +240,33 @@ jobs:
               with open(pm_file, "w") as f:
                   f.write(pm_patch_header + pm_code)
 
-          # 8. infra/file_wrapper.c Linux 4.14 VFS uyumluluk yaması
+          # 8. infra/file_wrapper.c Linux 4.14 VFS uyumluluk köprüsü
           fw_header = (
+              "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n"
+              "#define _SUKISU_FILE_WRAPPER_4_14_\n"
               "#include <linux/version.h>\n"
+              "#include <linux/types.h>\n"
               "#include <linux/fs.h>\n"
+              "#include <linux/file.h>\n"
               "#include <linux/dcache.h>\n"
-              "#include <linux/mount.h>\n\n"
+              "#include <linux/mount.h>\n"
+              "#include <linux/security.h>\n"
+              "#include <linux/err.h>\n\n"
               "#ifndef __poll_t\n"
               "typedef unsigned int __poll_t;\n"
               "#endif\n\n"
               "#ifndef REMAP_FILE_DEDUP\n"
               "#define REMAP_FILE_DEDUP 0\n"
               "#endif\n\n"
-              "#ifndef security_inode_init_security_anon\n"
-              "#define security_inode_init_security_anon(inode, name, context_inode) (0)\n"
-              "#endif\n\n"
+              "static inline int security_inode_init_security_anon(struct inode *inode,\n"
+              "                                                   const struct qstr *name,\n"
+              "                                                   const struct inode *context_inode)\n"
+              "{\n"
+              "    (void)inode;\n"
+              "    (void)name;\n"
+              "    (void)context_inode;\n"
+              "    return 0;\n"
+              "}\n\n"
               "#ifndef selinux_inode\n"
               "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
               "#endif\n\n"
@@ -263,6 +277,7 @@ jobs:
               "{\n"
               "    struct qstr this = QSTR_INIT(name, strlen(name));\n"
               "    struct path path;\n"
+              "    struct file *file;\n"
               "    path.dentry = d_alloc_pseudo(mnt->mnt_sb, &this);\n"
               "    if (!path.dentry) {\n"
               "        iput(inode);\n"
@@ -270,31 +285,37 @@ jobs:
               "    }\n"
               "    path.mnt = mntget(mnt);\n"
               "    d_instantiate(path.dentry, inode);\n"
-              "    return alloc_file(&path, (fmode_t)flags, fops);\n"
+              "    file = alloc_file(&path, (fmode_t)flags, fops);\n"
+              "    if (IS_ERR(file)) {\n"
+              "        ihold(inode);\n"
+              "        path_put(&path);\n"
+              "    }\n"
+              "    return file;\n"
               "}\n"
-              "#endif\n\n"
+              "#endif\n"
+              "#endif /* _SUKISU_FILE_WRAPPER_4_14_ */\n\n"
           )
-          for fw_file in glob.glob("**/infra/file_wrapper.c", recursive=True):
+          for fw_file in get_unique_files("**/infra/file_wrapper.c"):
               with open(fw_file, "r") as f:
-                  lines = f.readlines()
-              new_lines = []
-              skip_func = False
-              for line in lines:
-                  # 4.14 struct file_operations içinde olmayan alan atamalarını devre dışı bırak
-                  if any(op in line for op in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]):
-                      new_lines.append("// [4.14 backport] " + line)
-                  # 4.14 te var olmayan fonksiyon gövdelerini atla
-                  elif "ksu_wrapper_iopoll(" in line or "ksu_wrapper_remap_file_range(" in line or "ksu_wrapper_fadvise(" in line:
-                      new_lines.append("// [4.14 backport] modern fops omitted\n")
-                      skip_func = True
-                  elif skip_func:
-                      if line.startswith("}"):
-                          skip_func = False
-                  else:
-                      new_lines.append(line)
-              with open(fw_file, "w") as f:
-                  f.write(fw_header + "".join(new_lines))
-              print(f"[OK] file_wrapper.c 4.14 e uyarlandi: {fw_file}")
+                  content = f.read()
+              if "_SUKISU_FILE_WRAPPER_4_14_" not in content:
+                  lines = content.splitlines(True)
+                  new_lines = []
+                  skip_func = False
+                  for line in lines:
+                      if any(op in line for op in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]):
+                          new_lines.append("// [4.14 backport] " + line)
+                      elif any(fn in line for fn in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]):
+                          new_lines.append("// [4.14 backport] modern fops omitted\n")
+                          skip_func = True
+                      elif skip_func:
+                          if line.startswith("}"):
+                              skip_func = False
+                      else:
+                          new_lines.append(line)
+                  with open(fw_file, "w") as f:
+                      f.write(fw_header + "".join(new_lines))
+                  print(f"[OK] file_wrapper.c tekillestirilerek uyarlandi: {fw_file}")
           '
 
       - name: Setup Configuration
