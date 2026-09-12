@@ -108,7 +108,6 @@ jobs:
           python3 -c '
           import os, glob
 
-          # Tekilleştirme fonksiyonu (Symlink yinelenmesini önler)
           def get_unique_files(pattern):
               return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
@@ -240,7 +239,7 @@ jobs:
               with open(pm_file, "w") as f:
                   f.write(pm_patch_header + pm_code)
 
-          # 8. infra/file_wrapper.c Linux 4.14 VFS uyumluluk köprüsü
+          # file_wrapper.c Linux 4.14 VFS uyumluluk köprüsü
           fw_header = (
               "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n"
               "#define _SUKISU_FILE_WRAPPER_4_14_\n"
@@ -254,6 +253,7 @@ jobs:
               "#include <linux/err.h>\n\n"
               "#ifndef __poll_t\n"
               "typedef unsigned int __poll_t;\n"
+              "#define __poll_t __poll_t\n"
               "#endif\n\n"
               "#ifndef REMAP_FILE_DEDUP\n"
               "#define REMAP_FILE_DEDUP 0\n"
@@ -315,7 +315,51 @@ jobs:
                           new_lines.append(line)
                   with open(fw_file, "w") as f:
                       f.write(fw_header + "".join(new_lines))
-                  print(f"[OK] file_wrapper.c tekillestirilerek uyarlandi: {fw_file}")
+
+          # 7. include/linux/poll.h ve event_queue uyumluluğu (__poll_t ve EPOLL* bayrakları)
+          poll_h = "include/linux/poll.h"
+          if os.path.exists(poll_h):
+              with open(poll_h, "r") as f:
+                  ph_c = f.read()
+              if "__poll_t" not in ph_c:
+                  ph_patch = (
+                      "\n#include <uapi/linux/eventpoll.h>\n"
+                      "#ifndef __poll_t\n"
+                      "typedef unsigned int __poll_t;\n"
+                      "#define __poll_t __poll_t\n"
+                      "#endif\n"
+                  )
+                  with open(poll_h, "a") as f:
+                      f.write(ph_patch)
+                  print("[OK] include/linux/poll.h içine __poll_t eklendi.")
+
+          eq_header = (
+              "#ifndef _SUKISU_EVENT_QUEUE_4_14_\n"
+              "#define _SUKISU_EVENT_QUEUE_4_14_\n"
+              "#include <linux/poll.h>\n"
+              "#include <uapi/linux/eventpoll.h>\n"
+              "#ifndef __poll_t\n"
+              "typedef unsigned int __poll_t;\n"
+              "#define __poll_t __poll_t\n"
+              "#endif\n"
+              "#ifndef EPOLLIN\n"
+              "#define EPOLLIN 0x00000001\n"
+              "#endif\n"
+              "#ifndef EPOLLHUP\n"
+              "#define EPOLLHUP 0x00000010\n"
+              "#endif\n"
+              "#ifndef EPOLLRDNORM\n"
+              "#define EPOLLRDNORM 0x00000040\n"
+              "#endif\n"
+              "#endif /* _SUKISU_EVENT_QUEUE_4_14_ */\n\n"
+          )
+          for eq_file in get_unique_files("**/infra/event_queue.*"):
+              with open(eq_file, "r") as f:
+                  content = f.read()
+              if "_SUKISU_EVENT_QUEUE_4_14_" not in content:
+                  with open(eq_file, "w") as f:
+                      f.write(eq_header + content)
+                  print(f"[OK] event_queue uyarlandı: {eq_file}")
           '
 
       - name: Setup Configuration
