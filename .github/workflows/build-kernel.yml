@@ -107,32 +107,35 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # KPM (patch_linux) sembol taraması için ZORUNLU bayraklar
+          # SukiSU Ultra bayraklarını doğrudan .config dosyasına enjekte et
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> out/.config
+
+          # KPM (patch_linux) sembol taraması için şart olan bayraklar
           ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
           ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
 
-          # Clang ve SUSFS bayrakları
+          # Clang optimizasyonları
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
-          ./scripts/config --file out/.config --enable CONFIG_KSU
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_PATH
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_ENABLE_LOG
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
+          # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # SukiSU'nun derlemeye girdiğini garantiye alıyoruz:
-          grep -E "CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
-
+          # Kontrol: drivers/Kconfig doğru bağlandıysa CONFIG_KSU asla silinmez
+          grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
+          
       - name: Build Raw Kernel Image
         shell: bash
         run: |
