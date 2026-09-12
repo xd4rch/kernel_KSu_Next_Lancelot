@@ -50,6 +50,8 @@ jobs:
           mkdir -p clang
           tar -C clang/ -zxvf clang.tar.gz --strip-components=1
           rm clang.tar.gz
+          # Sistemin kendi host linker'ını kullanması için eski host ld'yi kaldırıyoruz:
+          rm -f clang/bin/ld
 
       - name: Download LineageOS 20 Kernel Source
         shell: bash
@@ -103,6 +105,8 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export ARCH=arm64
           export SUBARCH=arm64
+          export HOSTLD=ld
+          export LLVM=1
 
           make -j"$(nproc --all)" O=out Image.gz
 
