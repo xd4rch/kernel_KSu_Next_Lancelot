@@ -83,27 +83,25 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          
+          # 1. Kaynak kodunu indir
           curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}" || true
 
-          # SukiSU'nun hem drivers/Makefile hem de drivers/Kconfig içine kesin eklenmesi
-          if [ -d "KernelSU" ]; then
-            if ! grep -q "KernelSU/Kconfig" drivers/Kconfig; then
-              echo 'source "KernelSU/Kconfig"' >> drivers/Kconfig
-              echo "drivers/Kconfig içerisine KernelSU eklendi."
-            fi
-            if ! grep -q "KernelSU" drivers/Makefile; then
-              echo 'obj-$(CONFIG_KSU) += ../KernelSU/kernel/' >> drivers/Makefile
-              echo "drivers/Makefile içerisine KernelSU eklendi."
-            fi
-          elif [ -d "drivers/kernelsu" ]; then
-            if ! grep -q "kernelsu/Kconfig" drivers/Kconfig; then
-              echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-              echo "drivers/Kconfig içerisine kernelsu eklendi."
-            fi
-            if ! grep -q "kernelsu" drivers/Makefile; then
-              echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-              echo "drivers/Makefile içerisine kernelsu eklendi."
-            fi
+          # 2. drivers/kernelsu sembolik bağını garantiye al
+          if [ -d "KernelSU/kernel" ]; then
+            ln -sfn ../KernelSU/kernel drivers/kernelsu
+          fi
+
+          # 3. drivers/Kconfig dosyasını temizle ve DOĞRU yolu ekle
+          sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
+          sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          echo "drivers/Kconfig içerisine source \"drivers/kernelsu/Kconfig\" eklendi."
+
+          # 4. drivers/Makefile dosyasını garantiye al
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+            echo "drivers/Makefile içerisine kernelsu eklendi."
           fi
 
       - name: Setup Configuration
@@ -113,7 +111,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # KRİTİK: KernelSU'nun Kconfig bağımlılığı olan OverlayFS
+          # KernelSU'nun Kconfig bağımlılığı olan OverlayFS
           ./scripts/config --file out/.config --enable CONFIG_OVERLAY_FS
 
           # KPM (patch_linux) sembol taraması için ZORUNLU bayraklar
@@ -141,7 +139,7 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama: Bağımlılıklar sağlandıysa CONFIG_KSU korunur
+          # Doğrulama: Bağımlılıklar sağlandığı için CONFIG_KSU asla silinmez
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -178,7 +176,7 @@ jobs:
 
             if [[ -f oImage ]]; then
               echo "KPM injection successful!"
-              # DTB birleştirmesi yapılmaz; yamalı oImage saf Image.gz olarak sıkıştırılır
+              # DTB birleştirmesi yapılmaz; sadece yamalı oImage sıkıştırılır
               gzip -c oImage > "$OUT_BOOT/Image.gz"
             else
               echo "Error: patch_linux oImage üretemedi!"
@@ -195,10 +193,10 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
 
-          # Cihaz kontrol kilidini kaldır (Unsupported device hatasını engeller)
+          # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Fiziksel boot adresi (OMAP hatasını engeller)
+          # Kesinleşen fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
