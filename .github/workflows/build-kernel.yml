@@ -59,22 +59,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone --recursive "${{ env.KERNEL_SOURCE }}" -b "${{ env.KERNEL_SOURCE_BRANCH }}" android-kernel --depth=1
 
-      - name: Apply KernelSU 4.14 Namespace and Manual Hooks
+      - name: Apply KernelSU 4.14 Manual Hooks
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          # 4.14 namespace desteği
-          if [[ -f "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" ]]; then
-            git apply "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" || true
-            echo "ksu_namespace_4.14.patch uygulandı."
-          fi
-
           # Non-GKI 4.14 sistem çağrı kancaları (fs/exec.c, fs/open.c)
           if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
-            echo "KSU_HOOKS_PATCH.patch uygulandı."
+            echo "KSU_HOOKS_PATCH.patch işlendi."
           fi
 
       - name: Setup SukiSU Ultra (SUSFS) Driver
