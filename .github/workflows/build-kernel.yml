@@ -125,7 +125,6 @@ jobs:
               if "_SUKISU_SYSCALL_FN_T_" not in content:
                   with open(h_path, "w") as f:
                       f.write(patch_header + content)
-                  print(f"[OK] syscall_fn_t eklendi: {h_path}")
 
           asm_syscall = "arch/arm64/include/asm/syscall.h"
           if os.path.exists(asm_syscall):
@@ -134,7 +133,6 @@ jobs:
               if "_SUKISU_SYSCALL_FN_T_" not in ac:
                   with open(asm_syscall, "w") as f:
                       f.write(patch_header + ac)
-                  print("[OK] asm/syscall.h güncellendi.")
 
           # init.c içine MODULE_IMPORT_NS tanımı
           init_files = glob.glob("**/core/init.c", recursive=True)
@@ -149,7 +147,6 @@ jobs:
               if "MODULE_IMPORT_NS" not in content or "#define MODULE_IMPORT_NS" not in content:
                   with open(i_path, "w") as f:
                       f.write(ns_patch + content)
-                  print(f"[OK] MODULE_IMPORT_NS eklendi: {i_path}")
 
           # access_ok 2/3 parametre uyumluluğu
           uaccess = "arch/arm64/include/asm/uaccess.h"
@@ -165,19 +162,16 @@ jobs:
                           f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
                       else:
                           f.write(line)
-              print("[OK] uaccess.h access_ok uyumluluğu korundu.")
 
           # include/linux/set_memory.h köprüsü
           if not os.path.exists("include/linux/set_memory.h"):
               with open("include/linux/set_memory.h", "w") as f:
                   f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
-              print("[OK] include/linux/set_memory.h eklendi.")
 
           # include/linux/pgtable.h köprüsü
           if not os.path.exists("include/linux/pgtable.h"):
               with open("include/linux/pgtable.h", "w") as f:
                   f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
-              print("[OK] include/linux/pgtable.h eklendi.")
 
           # sucompat.c ve util.h uyumluluğu
           compat_header = (
@@ -197,7 +191,6 @@ jobs:
               sc = sc.replace("ksys_close", "sys_close")
               with open(su_file, "w") as f:
                   f.write(compat_header + sc)
-              print(f"[OK] sucompat.c güncellendi: {su_file}")
 
           for util_h in glob.glob("**/include/util.h", recursive=True):
               with open(util_h, "r") as f:
@@ -205,7 +198,6 @@ jobs:
               uc = uc.replace("ksys_close", "sys_close")
               with open(util_h, "w") as f:
                   f.write(compat_header + uc)
-              print(f"[OK] util.h güncellendi: {util_h}")
 
           # lsm_hook.c stub
           lsm_stub = (
@@ -216,7 +208,6 @@ jobs:
           for lsm_f in glob.glob("**/hook/lsm_hook.c", recursive=True):
               with open(lsm_f, "w") as f:
                   f.write(lsm_stub)
-              print(f"[OK] lsm_hook.c stublandı: {lsm_f}")
 
           # strncpy_from_user için uaccess.h enjeksiyonu
           all_c_files = glob.glob("drivers/kernelsu/**/*.c", recursive=True) + glob.glob("KernelSU/**/*.c", recursive=True)
@@ -227,7 +218,7 @@ jobs:
                   with open(c_path, "w") as f:
                       f.write("#include <linux/uaccess.h>\n" + code)
 
-          # 7. patch_memory.c: __pte_to_phys, copy_to_kernel_nofault ve flush_icache_range uyumluluğu
+          # patch_memory.c uyumluluğu
           pm_patch_header = (
               "#include <linux/uaccess.h>\n"
               "#include <asm/cacheflush.h>\n"
@@ -242,13 +233,68 @@ jobs:
           for pm_file in glob.glob("**/hook/arm64/patch_memory.c", recursive=True):
               with open(pm_file, "r") as f:
                   pm_code = f.read()
-              # __flush_icache_range çağrısını 4.14 standardı olan flush_icache_range ile değiştir
               pm_code = pm_code.replace("__flush_icache_range", "flush_icache_range")
-              # copy_to_kernel_nofault çağrısını probe_kernel_write ile değiştir
               pm_code = pm_code.replace("copy_to_kernel_nofault", "probe_kernel_write")
               with open(pm_file, "w") as f:
                   f.write(pm_patch_header + pm_code)
-              print(f"[OK] patch_memory.c güncellendi: {pm_file}")
+
+          # 8. infra/file_wrapper.c Linux 4.14 VFS uyumluluk yaması
+          fw_header = (
+              "#include <linux/version.h>\n"
+              "#include <linux/fs.h>\n"
+              "#include <linux/dcache.h>\n"
+              "#include <linux/mount.h>\n\n"
+              "#ifndef __poll_t\n"
+              "typedef unsigned int __poll_t;\n"
+              "#endif\n\n"
+              "#ifndef REMAP_FILE_DEDUP\n"
+              "#define REMAP_FILE_DEDUP 0\n"
+              "#endif\n\n"
+              "#ifndef security_inode_init_security_anon\n"
+              "#define security_inode_init_security_anon(inode, name, context_inode) (0)\n"
+              "#endif\n\n"
+              "#ifndef selinux_inode\n"
+              "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
+              "#endif\n\n"
+              "#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0)\n"
+              "static inline struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,\n"
+              "                                             const char *name, int flags,\n"
+              "                                             const struct file_operations *fops)\n"
+              "{\n"
+              "    struct qstr this = QSTR_INIT(name, strlen(name));\n"
+              "    struct path path;\n"
+              "    path.dentry = d_alloc_pseudo(mnt->mnt_sb, &this);\n"
+              "    if (!path.dentry) {\n"
+              "        iput(inode);\n"
+              "        return ERR_PTR(-ENOMEM);\n"
+              "    }\n"
+              "    path.mnt = mntget(mnt);\n"
+              "    d_instantiate(path.dentry, inode);\n"
+              "    return alloc_file(&path, (fmode_t)flags, fops);\n"
+              "}\n"
+              "#endif\n\n"
+          )
+          for fw_file in glob.glob("**/infra/file_wrapper.c", recursive=True):
+              with open(fw_file, "r") as f:
+                  lines = f.readlines()
+              new_lines = []
+              skip_func = False
+              for line in lines:
+                  # 4.14 struct file_operations içinde olmayan alan atamalarını devre dışı bırak
+                  if any(op in line for op in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]):
+                      new_lines.append("// [4.14 backport] " + line)
+                  # 4.14 te var olmayan fonksiyon gövdelerini atla
+                  elif "ksu_wrapper_iopoll(" in line or "ksu_wrapper_remap_file_range(" in line or "ksu_wrapper_fadvise(" in line:
+                      new_lines.append("// [4.14 backport] modern fops omitted\n")
+                      skip_func = True
+                  elif skip_func:
+                      if line.startswith("}"):
+                          skip_func = False
+                  else:
+                      new_lines.append(line)
+              with open(fw_file, "w") as f:
+                  f.write(fw_header + "".join(new_lines))
+              print(f"[OK] file_wrapper.c 4.14 e uyarlandi: {fw_file}")
           '
 
       - name: Setup Configuration
