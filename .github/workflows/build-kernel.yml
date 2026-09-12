@@ -13,7 +13,7 @@ on:
 
 jobs:
   build:
-    name: Build SukiSU Ultra
+    name: Build SukiSU Ultra + KPM
     runs-on: ubuntu-22.04
     env:
       DEVICE: ${{ github.event.inputs.select_device }}
@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential curl flex git git-lfs libelf-dev libssl-dev \
-            lzop zip python3 tar xz-utils libncurses5-dev
+            lzop zip python3 python-is-python3 tar xz-utils libncurses5-dev
           mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
 
       - name: Download Proton Clang
@@ -50,7 +50,7 @@ jobs:
           mkdir -p clang
           tar -C clang/ -zxvf clang.tar.gz --strip-components=1
           rm clang.tar.gz
-          # Sistemin kendi host linker'ını kullanması için eski host ld'yi kaldırıyoruz:
+          # Ubuntu 22.04 glibc uyuşmazlığını engellemek için Proton içindeki host ld ikilisini siliyoruz:
           rm -f clang/bin/ld
 
       - name: Download LineageOS 20 Kernel Source
@@ -74,7 +74,11 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # LineageOS Clang uyumluluğu ve SukiSU/SUSFS bayrakları
+          # KPM (patch_linux) sembol taraması için ZORUNLU bayraklar
+          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
+          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
+
+          # Clang ve SUSFS bayrakları
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
           ./scripts/config --file out/.config --enable CONFIG_KSU
@@ -93,22 +97,47 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
-      - name: Build Kernel Image
+      - name: Build Raw Kernel Image
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
-          export CC=clang
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export HOSTLD=ld
-          export LLVM=1
 
-          make -j"$(nproc --all)" O=out Image.gz
+          # KPM'in yamalayabilmesi için ham 'Image' derlenir
+          make -j"$(nproc --all)" \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image
+
+      - name: Patch SukiSU Ultra KPM
+        if: env.KPM_SUPPORT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_BOOT="$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot"
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+          cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+
+          wget -nv -O patch_linux "${{ env.KPM_URL }}" || wget -nv "${{ env.KPM_URL }}"
+          chmod +x patch_linux
+          cp "$OUT_BOOT/Image" .
+
+          # KernelPatch enjeksiyonu
+          ./patch_linux
+
+          if [[ -f oImage ]]; then
+            echo "KPM injection successful!"
+            # DTB birleştirmesi yapılmaz; sadece yamalı oImage saf Image.gz olarak sıkıştırılır
+            gzip -c oImage > "$OUT_BOOT/Image.gz"
+          else
+            echo "Error: patch_linux oImage üretemedi!"
+            exit 1
+          fi
 
       - name: Prepare AnyKernel3
         shell: bash
@@ -116,12 +145,12 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
-          
-          # Doğrulanmış donanım yolunu AnyKernel3'e yazıyoruz
-          sed -i 's/block=boot;/block=\/dev\/block\/mmcblk0p34;/g' AnyKernel3/anykernel.sh
-          sed -i 's/is_slot_device=auto;/is_slot_device=0;/g' AnyKernel3/anykernel.sh
-          
-          # Saf Image.gz kopyalanır (Telefonun çalışan DTB'sine dokunulmaz)
+
+          # Doğrulanmış donanım yolunu AnyKernel3'e yaz
+          sed -i -E 's|^block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
+
+          # KPM'li saf Image.gz dosyasını kopyala (Cihazın orijinal DTB'si korunur)
           cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
