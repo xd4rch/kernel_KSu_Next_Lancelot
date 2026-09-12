@@ -179,7 +179,7 @@ jobs:
                   f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
               print("[OK] include/linux/pgtable.h eklendi.")
 
-          # sucompat.c ve util.h: strncpy_from_user_nofault ve ksys_close uyumluluğu
+          # sucompat.c ve util.h uyumluluğu
           compat_header = (
               "#include <linux/syscalls.h>\n"
               "#include <linux/uaccess.h>\n"
@@ -206,6 +206,17 @@ jobs:
               with open(util_h, "w") as f:
                   f.write(compat_header + uc)
               print(f"[OK] util.h güncellendi: {util_h}")
+
+          # lsm_hook.c uyumluluğu (Manual Hooks devrede olduğu için stub haline getirilir)
+          lsm_stub = (
+              "#include <linux/types.h>\n"
+              "int ksu_lsm_hook_init(void) { return 0; }\n"
+              "void ksu_lsm_hook_exit(void) {}\n"
+          )
+          for lsm_f in glob.glob("**/hook/lsm_hook.c", recursive=True):
+              with open(lsm_f, "w") as f:
+                  f.write(lsm_stub)
+              print(f"[OK] lsm_hook.c stub haline getirildi: {lsm_f}")
           '
 
       - name: Setup Configuration
