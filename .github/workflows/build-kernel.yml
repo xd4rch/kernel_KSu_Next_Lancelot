@@ -50,7 +50,6 @@ jobs:
           mkdir -p clang
           tar -C clang/ -zxvf clang.tar.gz --strip-components=1
           rm clang.tar.gz
-          # Host ld'nin Ubuntu 22.04 yerel linker'ını ezmesini engelle
           rm -f clang/bin/ld
 
       - name: Download LineageOS 20 Kernel Source
@@ -66,16 +65,16 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          # 4.14 için namespace desteği
+          # 4.14 namespace desteği
           if [[ -f "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" || true
-            echo "ksu_namespace_4.14.patch işlendi."
+            echo "ksu_namespace_4.14.patch uygulandı."
           fi
 
           # Non-GKI 4.14 sistem çağrı kancaları (fs/exec.c, fs/open.c)
           if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
-            echo "KSU_HOOKS_PATCH.patch işlendi."
+            echo "KSU_HOOKS_PATCH.patch uygulandı."
           fi
 
       - name: Setup SukiSU Ultra (SUSFS) Driver
@@ -87,19 +86,50 @@ jobs:
           # 1. SukiSU kurulum betiğini çalıştır
           curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}" || true
 
-          # 2. drivers/kernelsu sembolik bağını doğrula
+          # 2. drivers/kernelsu sembolik bağını kur
           if [ -d "KernelSU/kernel" ] && [ ! -d "drivers/kernelsu" ]; then
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. drivers/Kconfig içine endmenu öncesine ekle (Kconfig içeriğine dokunulmaz)
-          sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
-          sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
-          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          # 3. KPROBES bağımlılık engelini Kconfig'den Python ile kaldır (Non-GKI şartı)
+          python3 -c '
+          import os
+          target = "drivers/kernelsu/Kconfig"
+          if not os.path.exists(target) and os.path.exists("KernelSU/kernel/Kconfig"):
+              target = "KernelSU/kernel/Kconfig"
+          if os.path.exists(target):
+              with open(target, "r") as f:
+                  lines = f.readlines()
+              with open(target, "w") as f:
+                  for line in lines:
+                      if "depends on" in line and "KPROBES" in line:
+                          f.write("# " + line)
+                      else:
+                          f.write(line)
+              print(f"[OK] {target} dosyasindaki KPROBES engeli kaldirildi.")
+          '
 
-          # 4. drivers/Makefile içine ekle
+          # 4. drivers/Kconfig dosyasının en sonundaki ana endmenu öncesine hatasız ekle
+          python3 -c '
+          with open("drivers/Kconfig", "r") as f:
+              lines = f.readlines()
+          # Varsa eski eklemeleri temizle
+          clean_lines = [l for l in lines if "kernelsu/Kconfig" not in l and "KernelSU/Kconfig" not in l]
+          content = "".join(clean_lines)
+          idx = content.rfind("endmenu")
+          if idx != -1:
+              content = content[:idx] + "source \"drivers/kernelsu/Kconfig\"\n\n" + content[idx:]
+          else:
+              content += "\nsource \"drivers/kernelsu/Kconfig\"\n"
+          with open("drivers/Kconfig", "w") as f:
+              f.write(content)
+          print("[OK] drivers/Kconfig dosyasina SukiSU kaynagi enjekte edildi.")
+          '
+
+          # 5. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+            echo "[OK] drivers/Makefile guncellendi."
           fi
 
       - name: Setup Configuration
@@ -110,7 +140,7 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
-          # SukiSU, SUSFS ve bağımlılık bayraklarını doğrudan defconfig'e yazıyoruz
+          # Bayrakları doğrudan kaynak defconfig dosyasına yaz
           cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_OVERLAY_FS=y
           CONFIG_KALLSYMS=y
@@ -140,7 +170,7 @@ jobs:
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # SukiSU bayrağının korunduğunu doğrula
+          # Doğrulama: Bağımlılıklar sağlandığı için CONFIG_KSU asla silinmez
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -196,7 +226,7 @@ jobs:
           # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Fiziksel boot adresi
+          # Kesinleşen fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
