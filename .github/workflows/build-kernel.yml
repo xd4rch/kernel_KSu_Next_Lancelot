@@ -83,7 +83,22 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
-          curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}"
+
+          # 1. SukiSU Ultra kaynak kodunu klonla
+          curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}" || true
+
+          # 2. Sürücüyü drivers/Makefile içerisine ZORLA bağla
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+            echo "drivers/Makefile güncellendi."
+          fi
+
+          # 3. Kconfig dosyasını drivers/Kconfig içerisine ZORLA bağla
+          if ! grep -q "kernelsu/Kconfig" drivers/Kconfig; then
+            # 'endmenu' satırından hemen önce Kconfig kaynağını ekle
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+            echo "drivers/Kconfig güncellendi."
+          fi
 
       - name: Setup Configuration
         shell: bash
