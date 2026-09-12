@@ -174,6 +174,13 @@ jobs:
               with open("include/linux/pgtable.h", "w") as f:
                   f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
 
+          # include/uapi/linux/mount.h köprüsü (Linux 5.2+ -> Linux 4.14 uyumluluğu)
+          os.makedirs("include/uapi/linux", exist_ok=True)
+          if not os.path.exists("include/uapi/linux/mount.h"):
+              with open("include/uapi/linux/mount.h", "w") as f:
+                  f.write("#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n")
+              print("[OK] include/uapi/linux/mount.h köprüsü oluşturuldu.")
+
           # sucompat.c ve util.h uyumluluğu
           compat_header = (
               "#include <linux/syscalls.h>\n"
@@ -359,7 +366,7 @@ jobs:
                   with open(eq_file, "w") as f:
                       f.write(eq_header + content)
 
-          # 7. seccomp_cache.c ve asm/seccomp.h SECCOMP_ARCH_NATIVE_NR uyumluluğu
+          # seccomp_cache.c ve asm/seccomp.h uyumluluğu
           sc_header = (
               "#ifndef _SUKISU_SECCOMP_CACHE_4_14_\n"
               "#define _SUKISU_SECCOMP_CACHE_4_14_\n"
@@ -386,7 +393,6 @@ jobs:
               if "_SUKISU_SECCOMP_CACHE_4_14_" not in content:
                   with open(sc_file, "w") as f:
                       f.write(sc_header + content)
-                  print(f"[OK] seccomp_cache uyarlandı: {sc_file}")
 
           asm_seccomp = "arch/arm64/include/asm/seccomp.h"
           if os.path.exists(asm_seccomp):
@@ -395,7 +401,15 @@ jobs:
               if "_SUKISU_SECCOMP_CACHE_4_14_" not in asc:
                   with open(asm_seccomp, "a") as f:
                       f.write("\n" + sc_header)
-                  print("[OK] asm/seccomp.h güncellendi.")
+
+          # su_mount_ns.c uyumluluğu
+          for mnt_file in get_unique_files("**/infra/su_mount_ns.c"):
+              with open(mnt_file, "r") as f:
+                  mc = f.read()
+              mc = mc.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>")
+              with open(mnt_file, "w") as f:
+                  f.write(mc)
+              print(f"[OK] su_mount_ns.c güncellendi: {mnt_file}")
           '
 
       - name: Setup Configuration
