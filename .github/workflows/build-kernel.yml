@@ -104,31 +104,55 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları (MODULE_IMPORT_NS, syscall_fn_t, access_ok, set_memory.h)
-          if ! grep -q "MODULE_IMPORT_NS" include/linux/module.h; then
-            echo "" >> include/linux/module.h
-            echo "#ifndef MODULE_IMPORT_NS" >> include/linux/module.h
-            echo "#define MODULE_IMPORT_NS(ns)" >> include/linux/module.h
-            echo "#endif" >> include/linux/module.h
-          fi
-
-          for init_c in drivers/kernelsu/core/init.c KernelSU/kernel/core/init.c; do
-            if [ -f "$init_c" ] && ! grep -q "#define MODULE_IMPORT_NS" "$init_c"; then
-              sed -i '1s|^|#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n|' "$init_c"
-            fi
-          done
-
-          for shdr in drivers/kernelsu/hook/syscall_hook.h KernelSU/kernel/hook/syscall_hook.h; do
-            if [ -f "$shdr" ] && ! grep -q "typedef.*syscall_fn_t" "$shdr"; then
-              sed -i '1s|^|struct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n|' "$shdr"
-            fi
-          done
-
-          # 7. access_ok makrosunu hem 2 hem 3 parametreye uyumlu yap & set_memory.h bağla
+          # 6. Linux 4.14 Uyumluluk Yamaları: syscall_fn_t, MODULE_IMPORT_NS, access_ok, set_memory.h
           python3 -c '
-          import os
+          import os, glob
 
-          # access_ok uyumluluğu
+          # syscall_hook.h dosyalarının en tepesine koşulsuz typedef enjeksiyonu
+          hook_headers = glob.glob("**/hook/syscall_hook.h", recursive=True)
+          patch_header = (
+              "#ifndef _SUKISU_SYSCALL_FN_T_\n"
+              "#define _SUKISU_SYSCALL_FN_T_\n"
+              "#include <linux/compiler.h>\n"
+              "#include <linux/types.h>\n"
+              "struct pt_regs;\n"
+              "typedef long (*syscall_fn_t)(const struct pt_regs *);\n"
+              "#endif /* _SUKISU_SYSCALL_FN_T_ */\n\n"
+          )
+          for h_path in set(hook_headers):
+              with open(h_path, "r") as f:
+                  content = f.read()
+              if "_SUKISU_SYSCALL_FN_T_" not in content:
+                  with open(h_path, "w") as f:
+                      f.write(patch_header + content)
+                  print(f"[OK] syscall_fn_t basariyla enjekte edildi: {h_path}")
+
+          # ARM64 asm/syscall.h başlığına da ekle
+          asm_syscall = "arch/arm64/include/asm/syscall.h"
+          if os.path.exists(asm_syscall):
+              with open(asm_syscall, "r") as f:
+                  ac = f.read()
+              if "_SUKISU_SYSCALL_FN_T_" not in ac:
+                  with open(asm_syscall, "w") as f:
+                      f.write(patch_header + ac)
+                  print("[OK] arch/arm64/include/asm/syscall.h guncellendi.")
+
+          # init.c içine MODULE_IMPORT_NS tanımı
+          init_files = glob.glob("**/core/init.c", recursive=True)
+          ns_patch = (
+              "#ifndef MODULE_IMPORT_NS\n"
+              "#define MODULE_IMPORT_NS(ns)\n"
+              "#endif\n\n"
+          )
+          for i_path in set(init_files):
+              with open(i_path, "r") as f:
+                  content = f.read()
+              if "MODULE_IMPORT_NS" not in content or "#define MODULE_IMPORT_NS" not in content:
+                  with open(i_path, "w") as f:
+                      f.write(ns_patch + content)
+                  print(f"[OK] MODULE_IMPORT_NS eklendi: {i_path}")
+
+          # access_ok 2/3 parametre uyumluluğu
           uaccess = "arch/arm64/include/asm/uaccess.h"
           if os.path.exists(uaccess):
               with open(uaccess, "r") as f:
@@ -142,13 +166,13 @@ jobs:
                           f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
                       else:
                           f.write(line)
-              print("[OK] uaccess.h access_ok 2/3 parametre uyumlulugu eklendi.")
+              print("[OK] uaccess.h access_ok uyumlulugu korundu.")
 
-          # linux/set_memory.h uyumluluğu
+          # linux/set_memory.h oluştur
           if not os.path.exists("include/linux/set_memory.h"):
               with open("include/linux/set_memory.h", "w") as f:
                   f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
-              print("[OK] include/linux/set_memory.h baglandi.")
+              print("[OK] include/linux/set_memory.h korundu.")
           '
 
       - name: Setup Configuration
@@ -191,7 +215,7 @@ jobs:
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama: SukiSU'nun silinmediğini kontrol et
+          # Doğrulama: SukiSU bayrağının silinmediğini kontrol et
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -247,7 +271,7 @@ jobs:
           # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Kesinleşen fiziksel boot adresi
+          # Fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
