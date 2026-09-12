@@ -104,14 +104,14 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları (Global Enjeksiyonlar Dahil)
+          # 6. Linux 4.14 Uyumluluk Yamaları
           python3 -c '
           import os, glob
 
           def get_unique_files(pattern):
               return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
-          # 6.1. GLOBAL: fallthrough makrosunu compiler.h dosyasına ekle
+          # GLOBAL: fallthrough makrosunu compiler.h dosyasına ekle
           comp_h = "include/linux/compiler.h"
           if os.path.exists(comp_h):
               with open(comp_h, "r") as f:
@@ -119,9 +119,8 @@ jobs:
               if "fallthrough" not in ch_c:
                   with open(comp_h, "a") as f:
                       f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
-                  print("[OK] Global fallthrough makrosu eklendi.")
 
-          # 6.2. GLOBAL: TWA_RESUME tanımlarını task_work.h dosyasına ekle
+          # GLOBAL: TWA_RESUME tanımlarını task_work.h dosyasına ekle
           tw_h = "include/linux/task_work.h"
           if os.path.exists(tw_h):
               with open(tw_h, "r") as f:
@@ -136,7 +135,6 @@ jobs:
                   )
                   with open(tw_h, "a") as f:
                       f.write(tw_patch)
-                  print("[OK] Global task_work_add TWA_* makroları eklendi.")
 
           # syscall_hook.h içine typedef enjeksiyonu
           patch_header = (
@@ -453,7 +451,7 @@ jobs:
               with open(pkg_f, "w") as f:
                   f.write(pkg_stub)
 
-          # 7. policy/allowlist.c ve put_task_struct kullanan tüm modüllerin uyumluluğu
+          # policy/allowlist.c ve put_task_struct uyumluluğu
           allowlist_header = (
               "#include <linux/sched/task.h>\n"
               "#include <linux/task_work.h>\n"
@@ -470,7 +468,6 @@ jobs:
                   pol_c = f.read()
               with open(pol_f, "w") as f:
                   f.write(allowlist_header + pol_c)
-              print(f"[OK] policy modülü uyarlandı: {pol_f}")
 
           # SukiSU altındaki tüm dosyalarda put_task_struct varsa sched/task.h garantile
           for cf in all_c_files:
@@ -479,6 +476,23 @@ jobs:
               if "put_task_struct" in fc and "<linux/sched/task.h>" not in fc:
                   with open(cf, "w") as f:
                       f.write("#include <linux/sched/task.h>\n" + fc)
+
+          # 8. policy/app_profile.c ve tüm ağaçta filter_count temizliği (4.14 seccomp uyumluluğu)
+          for ap_file in get_unique_files("drivers/kernelsu/**/*.c") | get_unique_files("KernelSU/**/*.c"):
+              with open(ap_file, "r") as f:
+                  ap_lines = f.readlines()
+              modified = False
+              clean_lines = []
+              for line in ap_lines:
+                  if "filter_count" in line:
+                      clean_lines.append("// [4.14 seccomp] " + line)
+                      modified = True
+                  else:
+                      clean_lines.append(line)
+              if modified:
+                  with open(ap_file, "w") as f:
+                      f.write("".join(clean_lines))
+                  print(f"[OK] filter_count temizlendi: {ap_file}")
           '
 
       - name: Setup Configuration
