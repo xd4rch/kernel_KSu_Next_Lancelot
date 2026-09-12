@@ -50,7 +50,7 @@ jobs:
           mkdir -p clang
           tar -C clang/ -zxvf clang.tar.gz --strip-components=1
           rm clang.tar.gz
-          # Host ld'nin yerel derleyiciyi ezmesini önle
+          # Host ld'nin Ubuntu 22.04 yerel linker'ını ezmesini engelle
           rm -f clang/bin/ld
 
       - name: Download LineageOS 20 Kernel Source
@@ -66,11 +66,13 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
+          # 4.14 için namespace desteği
           if [[ -f "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" || true
             echo "ksu_namespace_4.14.patch işlendi."
           fi
 
+          # Non-GKI 4.14 sistem çağrı kancaları (fs/exec.c, fs/open.c)
           if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
             echo "KSU_HOOKS_PATCH.patch işlendi."
@@ -90,18 +92,12 @@ jobs:
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. Kconfig bağımlılık kilidini kaldır (conf motorunun silmesini engeller)
-          if [ -f "drivers/kernelsu/Kconfig" ]; then
-            sed -i 's/depends on KPROBES//g' drivers/kernelsu/Kconfig || true
-            sed -i 's/depends on OVERLAY_FS//g' drivers/kernelsu/Kconfig || true
-          fi
-
-          # 4. drivers/Kconfig içine endmenu öncesine ekle
+          # 3. drivers/Kconfig içine endmenu öncesine ekle (Kconfig içeriğine dokunulmaz)
           sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
           sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-          # 5. drivers/Makefile içine ekle
+          # 4. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
@@ -114,7 +110,7 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
-          # Ayarları doğrudan kaynak defconfig dosyasına yazıyoruz
+          # SukiSU, SUSFS ve bağımlılık bayraklarını doğrudan defconfig'e yazıyoruz
           cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_OVERLAY_FS=y
           CONFIG_KALLSYMS=y
@@ -144,7 +140,7 @@ jobs:
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # SukiSU'nun silinmediğini kesin olarak doğrula
+          # SukiSU bayrağının korunduğunu doğrula
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -197,16 +193,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
 
-          # Cihaz kontrol kilidini kaldır (Unsupported device hatasını engeller)
+          # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Kesinleşen fiziksel boot adresi (Bölüm bulamama hatasını engeller)
+          # Fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' AnyKernel3/anykernel.sh
 
-          # Yamalanmış saf Image.gz dosyasını kopyala
+          # Saf Image.gz dosyasını kopyala
           cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
