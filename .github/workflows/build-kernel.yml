@@ -85,23 +85,46 @@ jobs:
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. drivers/Kconfig içine kaynağı ekle
+          # 3. Kconfig içindeki bağımlılık engellerini temizle (conf motorunun KSU'yu silmesini engeller)
+          for kcfg in drivers/kernelsu/Kconfig KernelSU/kernel/Kconfig; do
+            if [ -f "$kcfg" ]; then
+              sed -i '/depends on.*KPROBES/s/^/# /' "$kcfg" || true
+              sed -i '/depends on.*OVERLAY_FS/s/^/# /' "$kcfg" || true
+              echo "[OK] $kcfg bağımlılık engelleri kaldırıldı."
+            fi
+          done
+
+          # 4. drivers/Kconfig dosyasının sonuna SukiSU kaynağını bağla
           sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
-          # 4. drivers/Makefile içine ekle
+          # 5. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 5. Linux 4.14 Uyumluluk Tanımları (init.c ve syscall_hook.h için)
-          printf "\n#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n" >> include/linux/module.h
-          printf "\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n" >> arch/arm64/include/asm/syscall.h
-          
-          if [ -f "drivers/kernelsu/hook/syscall_hook.h" ]; then
-            sed -i '1s/^/#include <linux\/ptrace.h>\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n/' drivers/kernelsu/hook/syscall_hook.h
+          # 6. Linux 4.14 Uyumluluk Yamaları: MODULE_IMPORT_NS ve syscall_fn_t
+          if ! grep -q "MODULE_IMPORT_NS" include/linux/module.h; then
+            echo "" >> include/linux/module.h
+            echo "#ifndef MODULE_IMPORT_NS" >> include/linux/module.h
+            echo "#define MODULE_IMPORT_NS(ns)" >> include/linux/module.h
+            echo "#endif" >> include/linux/module.h
           fi
+
+          for init_c in drivers/kernelsu/core/init.c KernelSU/kernel/core/init.c; do
+            if [ -f "$init_c" ] && ! grep -q "#define MODULE_IMPORT_NS" "$init_c"; then
+              sed -i '1s|^|#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n|' "$init_c"
+              echo "[OK] $init_c içine MODULE_IMPORT_NS eklendi."
+            fi
+          done
+
+          for shdr in drivers/kernelsu/hook/syscall_hook.h KernelSU/kernel/hook/syscall_hook.h; do
+            if [ -f "$shdr" ] && ! grep -q "typedef.*syscall_fn_t" "$shdr"; then
+              sed -i '1s|^|struct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n|' "$shdr"
+              echo "[OK] $shdr içine syscall_fn_t eklendi."
+            fi
+          done
 
       - name: Setup Configuration
         shell: bash
@@ -111,56 +134,39 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
-          # Bayrakları defconfig dosyasına sıfır girintiyle ekle
-          for cfg in \
-            CONFIG_OVERLAY_FS \
-            CONFIG_KALLSYMS \
-            CONFIG_KALLSYMS_ALL \
-            CONFIG_KSU \
-            CONFIG_KSU_KPM \
-            CONFIG_KSU_SUSFS \
-            CONFIG_KSU_SUSFS_SUS_PATH \
-            CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
-            CONFIG_KSU_SUSFS_SUS_MOUNT \
-            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-            CONFIG_KSU_SUSFS_SUS_KSTAT \
-            CONFIG_KSU_SUSFS_TRY_UMOUNT \
-            CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            CONFIG_KSU_SUSFS_ENABLE_LOG \
-            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            CONFIG_KSU_SUSFS_OPEN_REDIRECT; do
-              echo "${cfg}=y" >> "$DEFCONFIG_FILE"
-          done
+          # Bayrakları defconfig dosyasına temiz şekilde ekle
+          {
+            echo "CONFIG_OVERLAY_FS=y"
+            echo "CONFIG_KALLSYMS=y"
+            echo "CONFIG_KALLSYMS_ALL=y"
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "CONFIG_KPM=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          } >> "$DEFCONFIG_FILE"
 
           # Defconfig dosyasını üret
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # scripts/config ile doğrudan out/.config üzerinde garantiye al
-          ./scripts/config --file out/.config --enable CONFIG_OVERLAY_FS
-          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
-          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
+          # Clang uyumluluk bayrakları
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
-          ./scripts/config --file out/.config --enable CONFIG_KSU
-          ./scripts/config --file out/.config --enable CONFIG_KSU_KPM
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_PATH
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_ENABLE_LOG
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama
+          # Doğrulama: SukiSU'nun silinmediğini kontrol et
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -216,7 +222,7 @@ jobs:
           # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Fiziksel boot adresi
+          # Kesinleşen fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
