@@ -85,7 +85,7 @@ jobs:
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. Kconfig içindeki bağımlılık engellerini temizle (conf motorunun KSU'yu silmesini engeller)
+          # 3. Kconfig bağımlılık engellerini temizle
           for kcfg in drivers/kernelsu/Kconfig KernelSU/kernel/Kconfig; do
             if [ -f "$kcfg" ]; then
               sed -i '/depends on.*KPROBES/s/^/# /' "$kcfg" || true
@@ -94,7 +94,7 @@ jobs:
             fi
           done
 
-          # 4. drivers/Kconfig dosyasının sonuna SukiSU kaynağını bağla
+          # 4. drivers/Kconfig içine SukiSU kaynağını bağla
           sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
@@ -104,7 +104,7 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları: MODULE_IMPORT_NS ve syscall_fn_t
+          # 6. Linux 4.14 Uyumluluk Yamaları (MODULE_IMPORT_NS, syscall_fn_t, access_ok, set_memory.h)
           if ! grep -q "MODULE_IMPORT_NS" include/linux/module.h; then
             echo "" >> include/linux/module.h
             echo "#ifndef MODULE_IMPORT_NS" >> include/linux/module.h
@@ -115,16 +115,41 @@ jobs:
           for init_c in drivers/kernelsu/core/init.c KernelSU/kernel/core/init.c; do
             if [ -f "$init_c" ] && ! grep -q "#define MODULE_IMPORT_NS" "$init_c"; then
               sed -i '1s|^|#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n|' "$init_c"
-              echo "[OK] $init_c içine MODULE_IMPORT_NS eklendi."
             fi
           done
 
           for shdr in drivers/kernelsu/hook/syscall_hook.h KernelSU/kernel/hook/syscall_hook.h; do
             if [ -f "$shdr" ] && ! grep -q "typedef.*syscall_fn_t" "$shdr"; then
               sed -i '1s|^|struct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n|' "$shdr"
-              echo "[OK] $shdr içine syscall_fn_t eklendi."
             fi
           done
+
+          # 7. access_ok makrosunu hem 2 hem 3 parametreye uyumlu yap & set_memory.h bağla
+          python3 -c '
+          import os
+
+          # access_ok uyumluluğu
+          uaccess = "arch/arm64/include/asm/uaccess.h"
+          if os.path.exists(uaccess):
+              with open(uaccess, "r") as f:
+                  lines = f.readlines()
+              with open(uaccess, "w") as f:
+                  for line in lines:
+                      if "#define access_ok" in line and "__range_ok" in line:
+                          f.write("#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), size)\n")
+                          f.write("#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), size)\n")
+                          f.write("#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n")
+                          f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
+                      else:
+                          f.write(line)
+              print("[OK] uaccess.h access_ok 2/3 parametre uyumlulugu eklendi.")
+
+          # linux/set_memory.h uyumluluğu
+          if not os.path.exists("include/linux/set_memory.h"):
+              with open("include/linux/set_memory.h", "w") as f:
+                  f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
+              print("[OK] include/linux/set_memory.h baglandi.")
+          '
 
       - name: Setup Configuration
         shell: bash
