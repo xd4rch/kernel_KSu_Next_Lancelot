@@ -174,12 +174,11 @@ jobs:
               with open("include/linux/pgtable.h", "w") as f:
                   f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
 
-          # include/uapi/linux/mount.h köprüsü (Linux 5.2+ -> Linux 4.14 uyumluluğu)
+          # include/uapi/linux/mount.h köprüsü
           os.makedirs("include/uapi/linux", exist_ok=True)
           if not os.path.exists("include/uapi/linux/mount.h"):
               with open("include/uapi/linux/mount.h", "w") as f:
                   f.write("#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n")
-              print("[OK] include/uapi/linux/mount.h köprüsü oluşturuldu.")
 
           # sucompat.c ve util.h uyumluluğu
           compat_header = (
@@ -402,13 +401,20 @@ jobs:
                   with open(asm_seccomp, "a") as f:
                       f.write("\n" + sc_header)
 
-          # su_mount_ns.c uyumluluğu
+          # su_mount_ns.c uyumluluğu (mount.h köprüsü + ksys_unshare -> sys_unshare)
           for mnt_file in get_unique_files("**/infra/su_mount_ns.c"):
               with open(mnt_file, "r") as f:
                   mc = f.read()
-              mc = mc.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>")
+              mc = mc.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>\n#include <linux/syscalls.h>")
+              mc = mc.replace("ksys_unshare", "sys_unshare")
+              prefix_unshare = (
+                  "#include <linux/syscalls.h>\n"
+                  "#ifndef ksys_unshare\n"
+                  "#define ksys_unshare sys_unshare\n"
+                  "#endif\n\n"
+              )
               with open(mnt_file, "w") as f:
-                  f.write(mc)
+                  f.write(prefix_unshare + mc)
               print(f"[OK] su_mount_ns.c güncellendi: {mnt_file}")
           '
 
