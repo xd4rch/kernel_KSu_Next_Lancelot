@@ -85,29 +85,10 @@ jobs:
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. KPROBES bağımlılık engelini Kconfig'den Python ile kaldır (Non-GKI şartı)
-          python3 -c '
-          import os
-          target = "drivers/kernelsu/Kconfig"
-          if not os.path.exists(target) and os.path.exists("KernelSU/kernel/Kconfig"):
-              target = "KernelSU/kernel/Kconfig"
-          if os.path.exists(target):
-              with open(target, "r") as f:
-                  lines = f.readlines()
-              with open(target, "w") as f:
-                  for line in lines:
-                      if "depends on" in line and "KPROBES" in line:
-                          f.write("# " + line)
-                      else:
-                          f.write(line)
-              print(f"[OK] {target} dosyasindaki KPROBES engeli kaldirildi.")
-          '
-
-          # 4. drivers/Kconfig dosyasının en sonundaki ana endmenu öncesine hatasız ekle
+          # 3. drivers/Kconfig dosyasının en sonundaki ana endmenu öncesine bağla
           python3 -c '
           with open("drivers/Kconfig", "r") as f:
               lines = f.readlines()
-          # Varsa eski eklemeleri temizle
           clean_lines = [l for l in lines if "kernelsu/Kconfig" not in l and "KernelSU/Kconfig" not in l]
           content = "".join(clean_lines)
           idx = content.rfind("endmenu")
@@ -117,14 +98,38 @@ jobs:
               content += "\nsource \"drivers/kernelsu/Kconfig\"\n"
           with open("drivers/Kconfig", "w") as f:
               f.write(content)
-          print("[OK] drivers/Kconfig dosyasina SukiSU kaynagi enjekte edildi.")
           '
 
-          # 5. drivers/Makefile içine ekle
+          # 4. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-            echo "[OK] drivers/Makefile guncellendi."
           fi
+
+          # 5. Linux 4.14 Uyumluluk Yamaları: MODULE_IMPORT_NS ve syscall_fn_t
+          # MODULE_IMPORT_NS Linux 5.4+ makrosudur, 4.14 için boş makro olarak tanımlanır:
+          if ! grep -q "MODULE_IMPORT_NS" include/linux/module.h; then
+            cat << 'EOF' >> include/linux/module.h
+
+          #ifndef MODULE_IMPORT_NS
+          #define MODULE_IMPORT_NS(ns)
+          #endif
+          EOF
+            echo "[OK] MODULE_IMPORT_NS uyumluluğu eklendi."
+          fi
+
+          # syscall_fn_t Linux 4.19+ ARM64 tipidir, 4.14 için tanımlanır:
+          python3 -c '
+          import os
+          target = "drivers/kernelsu/hook/syscall_hook.h"
+          if os.path.exists(target):
+              with open(target, "r") as f:
+                  content = f.read()
+              if "syscall_fn_t" not in content or "typedef" not in content:
+                  patch = "#include <linux/ptrace.h>\nstruct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n"
+                  with open(target, "w") as f:
+                      f.write(patch + content)
+                  print("[OK] syscall_fn_t tanımı syscall_hook.h dosyasına eklendi.")
+          '
 
       - name: Setup Configuration
         shell: bash
@@ -134,12 +139,13 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
-          # Bayrakları doğrudan kaynak defconfig dosyasına yaz
+          # Bayrakları doğrudan defconfig dosyasına yazıyoruz
           cat << 'EOF' >> "$DEFCONFIG_FILE"
           CONFIG_OVERLAY_FS=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           CONFIG_KSU=y
+          CONFIG_KSU_KPM=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
@@ -164,7 +170,7 @@ jobs:
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama: Bağımlılıklar sağlandığı için CONFIG_KSU asla silinmez
+          # Doğrulama: CONFIG_KSU bayrağının silinmediğini teyit et
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -220,7 +226,7 @@ jobs:
           # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Kesinleşen fiziksel boot adresi
+          # Fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
