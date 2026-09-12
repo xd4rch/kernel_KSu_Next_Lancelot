@@ -104,11 +104,11 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları (syscall_fn_t, MODULE_IMPORT_NS, access_ok, set_memory.h, pgtable.h)
+          # 6. Linux 4.14 Uyumluluk Yamaları
           python3 -c '
           import os, glob
 
-          # syscall_hook.h içine typedef enjeksiyonu
+          # syscall_fn_t enjeksiyonu
           hook_headers = glob.glob("**/hook/syscall_hook.h", recursive=True)
           patch_header = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n"
@@ -136,7 +136,7 @@ jobs:
                       f.write(patch_header + ac)
                   print("[OK] asm/syscall.h güncellendi.")
 
-          # init.c içine MODULE_IMPORT_NS tanımı
+          # MODULE_IMPORT_NS tanımı
           init_files = glob.glob("**/core/init.c", recursive=True)
           ns_patch = (
               "#ifndef MODULE_IMPORT_NS\n"
@@ -167,17 +167,45 @@ jobs:
                           f.write(line)
               print("[OK] uaccess.h access_ok uyumluluğu korundu.")
 
-          # linux/set_memory.h köprüsü
+          # include/linux/set_memory.h köprüsü
           if not os.path.exists("include/linux/set_memory.h"):
               with open("include/linux/set_memory.h", "w") as f:
                   f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
               print("[OK] include/linux/set_memory.h eklendi.")
 
-          # linux/pgtable.h köprüsü (Linux 5.8+ -> Linux 4.14 uyumluluğu)
+          # include/linux/pgtable.h köprüsü
           if not os.path.exists("include/linux/pgtable.h"):
               with open("include/linux/pgtable.h", "w") as f:
                   f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
               print("[OK] include/linux/pgtable.h eklendi.")
+
+          # sucompat.c ve util.h: strncpy_from_user_nofault ve ksys_close uyumluluğu
+          compat_header = (
+              "#include <linux/syscalls.h>\n"
+              "#include <linux/uaccess.h>\n"
+              "#ifndef strncpy_from_user_nofault\n"
+              "#define strncpy_from_user_nofault strncpy_from_user\n"
+              "#endif\n"
+              "#ifndef ksys_close\n"
+              "#define ksys_close sys_close\n"
+              "#endif\n\n"
+          )
+          for su_file in glob.glob("**/feature/sucompat.c", recursive=True):
+              with open(su_file, "r") as f:
+                  sc = f.read()
+              sc = sc.replace("strncpy_from_user_nofault", "strncpy_from_user")
+              sc = sc.replace("ksys_close", "sys_close")
+              with open(su_file, "w") as f:
+                  f.write(compat_header + sc)
+              print(f"[OK] sucompat.c güncellendi: {su_file}")
+
+          for util_h in glob.glob("**/include/util.h", recursive=True):
+              with open(util_h, "r") as f:
+                  uc = f.read()
+              uc = uc.replace("ksys_close", "sys_close")
+              with open(util_h, "w") as f:
+                  f.write(compat_header + uc)
+              print(f"[OK] util.h güncellendi: {util_h}")
           '
 
       - name: Setup Configuration
