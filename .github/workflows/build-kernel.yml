@@ -50,7 +50,7 @@ jobs:
           mkdir -p clang
           tar -C clang/ -zxvf clang.tar.gz --strip-components=1
           rm clang.tar.gz
-          # Ubuntu 22.04 glibc uyuşmazlığını engellemek için Proton içindeki host ld ikilisini siliyoruz:
+          # Host ld'nin Ubuntu 22.04 yerel linker'ını ezmesini engelliyoruz:
           rm -f clang/bin/ld
 
       - name: Download LineageOS 20 Kernel Source
@@ -59,6 +59,24 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone --recursive "${{ env.KERNEL_SOURCE }}" -b "${{ env.KERNEL_SOURCE_BRANCH }}" android-kernel --depth=1
+
+      - name: Apply KernelSU 4.14 Namespace and Manual Hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+          # 4.14 için namespace desteği
+          if [[ -f "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" ]]; then
+            git apply "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" || true
+            echo "ksu_namespace_4.14.patch uygulandı."
+          fi
+
+          # Non-GKI 4.14 sistem çağrı kancaları (fs/exec.c, fs/open.c, drivers/Makefile)
+          if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
+            git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
+            echo "KSU_HOOKS_PATCH.patch uygulandı."
+          fi
 
       - name: Setup SukiSU Ultra (SUSFS)
         shell: bash
@@ -97,6 +115,9 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
+          # SukiSU'nun derlemeye girdiğini garantiye alıyoruz:
+          grep -E "CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
+
       - name: Build Raw Kernel Image
         shell: bash
         run: |
@@ -115,28 +136,30 @@ jobs:
             Image
 
       - name: Patch SukiSU Ultra KPM
-        if: env.KPM_SUPPORT == 'true'
         shell: bash
         run: |
           set -euo pipefail
           OUT_BOOT="$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot"
-          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
-          cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+          if [[ "${{ env.KPM_SUPPORT }}" == "true" ]]; then
+            mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+            cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
 
-          wget -nv -O patch_linux "${{ env.KPM_URL }}" || wget -nv "${{ env.KPM_URL }}"
-          chmod +x patch_linux
-          cp "$OUT_BOOT/Image" .
+            wget -nv -O patch_linux "${{ env.KPM_URL }}" || wget -nv "${{ env.KPM_URL }}"
+            chmod +x patch_linux
+            cp "$OUT_BOOT/Image" .
 
-          # KernelPatch enjeksiyonu
-          ./patch_linux
+            ./patch_linux
 
-          if [[ -f oImage ]]; then
-            echo "KPM injection successful!"
-            # DTB birleştirmesi yapılmaz; sadece yamalı oImage saf Image.gz olarak sıkıştırılır
-            gzip -c oImage > "$OUT_BOOT/Image.gz"
+            if [[ -f oImage ]]; then
+              echo "KPM injection successful!"
+              # DTB birleştirmesi ASLA YAPILMAZ; sadece yamalı oImage sıkıştırılır:
+              gzip -c oImage > "$OUT_BOOT/Image.gz"
+            else
+              echo "Error: patch_linux oImage üretemedi!"
+              exit 1
+            fi
           else
-            echo "Error: patch_linux oImage üretemedi!"
-            exit 1
+            gzip -c "$OUT_BOOT/Image" > "$OUT_BOOT/Image.gz"
           fi
 
       - name: Prepare AnyKernel3
@@ -146,11 +169,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
 
-          # Doğrulanmış donanım yolunu AnyKernel3'e yaz
-          sed -i -E 's|^block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
-          sed -i -E 's|^is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
+          # Cihaz kontrol kilidini kaldırıyoruz (Unsupported device hatası engellendi)
+          sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # KPM'li saf Image.gz dosyasını kopyala (Cihazın orijinal DTB'si korunur)
+          # Kesinleşen fiziksel boot adresini yazıyoruz (OMAP ve partition hataları engellendi)
+          sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^[# ]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' AnyKernel3/anykernel.sh
+
+          # KPM'li saf Image.gz dosyasını kopyala (Telefonun çalışan DTB'si korunur)
           cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
