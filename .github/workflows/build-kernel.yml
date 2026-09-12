@@ -484,14 +484,13 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
           wget -nv -O patch_linux "${{ env.KPM_URL }}" || wget -nv "${{ env.KPM_URL }}"
           cp "$OUT_BOOT/Image" .
-          cp "$OUT_BOOT/dts/mediatek/mt6768.dtb" . 2>/dev/null || cp "$OUT_BOOT"/*.dtb . 2>/dev/null || true
           chmod +x patch_linux
           ./patch_linux
           if [[ -f oImage ]]; then
             mv -f oImage Image
             gzip -k -f Image
-            cat Image.gz *.dtb > Image.gz-dtb
-            mv -f Image.gz-dtb "$OUT_BOOT/${{ env.KERNEL_IMAGE_NAME }}"
+            # Yanlış DTB'leri birleştirmeden saf ve temiz Image.gz'yi boot dizinine atıyoruz
+            mv -f Image.gz "$OUT_BOOT/Image.gz"
           else
             echo "Error: patch_linux failed to produce oImage!"
             exit 1
