@@ -216,9 +216,9 @@ jobs:
           for lsm_f in glob.glob("**/hook/lsm_hook.c", recursive=True):
               with open(lsm_f, "w") as f:
                   f.write(lsm_stub)
-              print(f"[OK] lsm_hook.c stub haline getirildi: {lsm_f}")
+              print(f"[OK] lsm_hook.c stublandı: {lsm_f}")
 
-          # syscall_event_bridge.c ve strncpy_from_user kullanan tüm C dosyalarına uaccess.h enjeksiyonu
+          # strncpy_from_user için uaccess.h enjeksiyonu
           all_c_files = glob.glob("drivers/kernelsu/**/*.c", recursive=True) + glob.glob("KernelSU/**/*.c", recursive=True)
           for c_path in set(all_c_files):
               with open(c_path, "r") as f:
@@ -226,7 +226,29 @@ jobs:
               if "strncpy_from_user" in code and "<linux/uaccess.h>" not in code:
                   with open(c_path, "w") as f:
                       f.write("#include <linux/uaccess.h>\n" + code)
-                  print(f"[OK] uaccess.h eklendi: {c_path}")
+
+          # 7. patch_memory.c: __pte_to_phys, copy_to_kernel_nofault ve flush_icache_range uyumluluğu
+          pm_patch_header = (
+              "#include <linux/uaccess.h>\n"
+              "#include <asm/cacheflush.h>\n"
+              "#include <asm/pgtable.h>\n"
+              "#ifndef __pte_to_phys\n"
+              "#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n"
+              "#endif\n"
+              "#ifndef copy_to_kernel_nofault\n"
+              "#define copy_to_kernel_nofault probe_kernel_write\n"
+              "#endif\n\n"
+          )
+          for pm_file in glob.glob("**/hook/arm64/patch_memory.c", recursive=True):
+              with open(pm_file, "r") as f:
+                  pm_code = f.read()
+              # __flush_icache_range çağrısını 4.14 standardı olan flush_icache_range ile değiştir
+              pm_code = pm_code.replace("__flush_icache_range", "flush_icache_range")
+              # copy_to_kernel_nofault çağrısını probe_kernel_write ile değiştir
+              pm_code = pm_code.replace("copy_to_kernel_nofault", "probe_kernel_write")
+              with open(pm_file, "w") as f:
+                  f.write(pm_patch_header + pm_code)
+              print(f"[OK] patch_memory.c güncellendi: {pm_file}")
           '
 
       - name: Setup Configuration
