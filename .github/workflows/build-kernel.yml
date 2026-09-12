@@ -85,51 +85,23 @@ jobs:
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. drivers/Kconfig dosyasının en sonundaki ana endmenu öncesine bağla
-          python3 -c '
-          with open("drivers/Kconfig", "r") as f:
-              lines = f.readlines()
-          clean_lines = [l for l in lines if "kernelsu/Kconfig" not in l and "KernelSU/Kconfig" not in l]
-          content = "".join(clean_lines)
-          idx = content.rfind("endmenu")
-          if idx != -1:
-              content = content[:idx] + "source \"drivers/kernelsu/Kconfig\"\n\n" + content[idx:]
-          else:
-              content += "\nsource \"drivers/kernelsu/Kconfig\"\n"
-          with open("drivers/Kconfig", "w") as f:
-              f.write(content)
-          '
+          # 3. drivers/Kconfig içine kaynağı ekle
+          sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
+          sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
           # 4. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 5. Linux 4.14 Uyumluluk Yamaları: MODULE_IMPORT_NS ve syscall_fn_t
-          # MODULE_IMPORT_NS Linux 5.4+ makrosudur, 4.14 için boş makro olarak tanımlanır:
-          if ! grep -q "MODULE_IMPORT_NS" include/linux/module.h; then
-            cat << 'EOF' >> include/linux/module.h
-
-          #ifndef MODULE_IMPORT_NS
-          #define MODULE_IMPORT_NS(ns)
-          #endif
-          EOF
-            echo "[OK] MODULE_IMPORT_NS uyumluluğu eklendi."
+          # 5. Linux 4.14 Uyumluluk Tanımları (init.c ve syscall_hook.h için)
+          printf "\n#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n" >> include/linux/module.h
+          printf "\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n" >> arch/arm64/include/asm/syscall.h
+          
+          if [ -f "drivers/kernelsu/hook/syscall_hook.h" ]; then
+            sed -i '1s/^/#include <linux\/ptrace.h>\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n/' drivers/kernelsu/hook/syscall_hook.h
           fi
-
-          # syscall_fn_t Linux 4.19+ ARM64 tipidir, 4.14 için tanımlanır:
-          python3 -c '
-          import os
-          target = "drivers/kernelsu/hook/syscall_hook.h"
-          if os.path.exists(target):
-              with open(target, "r") as f:
-                  content = f.read()
-              if "syscall_fn_t" not in content or "typedef" not in content:
-                  patch = "#include <linux/ptrace.h>\nstruct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n"
-                  with open(target, "w") as f:
-                      f.write(patch + content)
-                  print("[OK] syscall_fn_t tanımı syscall_hook.h dosyasına eklendi.")
-          '
 
       - name: Setup Configuration
         shell: bash
@@ -139,38 +111,56 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
-          # Bayrakları doğrudan defconfig dosyasına yazıyoruz
-          cat << 'EOF' >> "$DEFCONFIG_FILE"
-          CONFIG_OVERLAY_FS=y
-          CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
-          CONFIG_KSU=y
-          CONFIG_KSU_KPM=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          EOF
+          # Bayrakları defconfig dosyasına sıfır girintiyle ekle
+          for cfg in \
+            CONFIG_OVERLAY_FS \
+            CONFIG_KALLSYMS \
+            CONFIG_KALLSYMS_ALL \
+            CONFIG_KSU \
+            CONFIG_KSU_KPM \
+            CONFIG_KSU_SUSFS \
+            CONFIG_KSU_SUSFS_SUS_PATH \
+            CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            CONFIG_KSU_SUSFS_SUS_MOUNT \
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+            CONFIG_KSU_SUSFS_SUS_KSTAT \
+            CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            CONFIG_KSU_SUSFS_ENABLE_LOG \
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT; do
+              echo "${cfg}=y" >> "$DEFCONFIG_FILE"
+          done
 
           # Defconfig dosyasını üret
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # Clang uyumluluk bayrakları
+          # scripts/config ile doğrudan out/.config üzerinde garantiye al
+          ./scripts/config --file out/.config --enable CONFIG_OVERLAY_FS
+          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
+          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
+          ./scripts/config --file out/.config --enable CONFIG_KSU
+          ./scripts/config --file out/.config --enable CONFIG_KSU_KPM
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_PATH
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_ENABLE_LOG
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
           # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama: CONFIG_KSU bayrağının silinmediğini teyit et
+          # Doğrulama
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
