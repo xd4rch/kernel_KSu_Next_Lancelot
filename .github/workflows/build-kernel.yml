@@ -14,7 +14,7 @@ on:
 jobs:
   build:
     name: Build SukiSU Ultra
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     env:
       DEVICE: ${{ github.event.inputs.select_device }}
     steps:
