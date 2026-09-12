@@ -50,7 +50,7 @@ jobs:
           mkdir -p clang
           tar -C clang/ -zxvf clang.tar.gz --strip-components=1
           rm clang.tar.gz
-          # Ubuntu 22.04 glibc uyuşmazlığını engellemek için Proton içindeki host ld ikilisini siliyoruz:
+          # Host ld'nin yerel derleyiciyi ezmesini önle
           rm -f clang/bin/ld
 
       - name: Download LineageOS 20 Kernel Source
@@ -66,42 +66,44 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          # 4.14 için namespace desteği
           if [[ -f "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/ksu_namespace_4.14.patch" || true
-            echo "ksu_namespace_4.14.patch uygulandı."
+            echo "ksu_namespace_4.14.patch işlendi."
           fi
 
-          # Non-GKI 4.14 sistem çağrı kancaları (fs/exec.c, fs/open.c)
           if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
-            echo "KSU_HOOKS_PATCH.patch uygulandı."
+            echo "KSU_HOOKS_PATCH.patch işlendi."
           fi
 
-      - name: Setup SukiSU Ultra (SUSFS)
+      - name: Setup SukiSU Ultra (SUSFS) Driver
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
-          
-          # 1. Kaynak kodunu indir
+
+          # 1. SukiSU kurulum betiğini çalıştır
           curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}" || true
 
-          # 2. drivers/kernelsu sembolik bağını garantiye al
-          if [ -d "KernelSU/kernel" ]; then
+          # 2. drivers/kernelsu sembolik bağını doğrula
+          if [ -d "KernelSU/kernel" ] && [ ! -d "drivers/kernelsu" ]; then
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. drivers/Kconfig dosyasını temizle ve DOĞRU yolu ekle
-          sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
-          sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
-          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo "drivers/Kconfig içerisine source \"drivers/kernelsu/Kconfig\" eklendi."
+          # 3. Kconfig bağımlılık kilidini kaldır (conf motorunun silmesini engeller)
+          if [ -f "drivers/kernelsu/Kconfig" ]; then
+            sed -i 's/depends on KPROBES//g' drivers/kernelsu/Kconfig || true
+            sed -i 's/depends on OVERLAY_FS//g' drivers/kernelsu/Kconfig || true
+          fi
 
-          # 4. drivers/Makefile dosyasını garantiye al
+          # 4. drivers/Kconfig içine endmenu öncesine ekle
+          sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
+          sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
+          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          # 5. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-            echo "drivers/Makefile içerisine kernelsu eklendi."
           fi
 
       - name: Setup Configuration
@@ -109,37 +111,40 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+          DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
+
+          # Ayarları doğrudan kaynak defconfig dosyasına yazıyoruz
+          cat << 'EOF' >> "$DEFCONFIG_FILE"
+          CONFIG_OVERLAY_FS=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          EOF
+
+          # Defconfig dosyasını üret
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # KernelSU'nun Kconfig bağımlılığı olan OverlayFS
-          ./scripts/config --file out/.config --enable CONFIG_OVERLAY_FS
-
-          # KPM (patch_linux) sembol taraması için ZORUNLU bayraklar
-          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
-          ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
-
-          # Clang ayarları
+          # Clang uyumluluk bayrakları
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
 
-          # SukiSU ve SUSFS bayrakları
-          ./scripts/config --file out/.config --enable CONFIG_KSU
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_PATH
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_KSTAT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_ENABLE_LOG
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
-
+          # Yapılandırmayı senkronize et
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama: Bağımlılıklar sağlandığı için CONFIG_KSU asla silinmez
+          # SukiSU'nun silinmediğini kesin olarak doğrula
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -149,7 +154,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
 
-          # KPM'in yamalayabilmesi için ham 'Image' derlenir
+          # Ham Image derlemesi
           make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
@@ -176,7 +181,6 @@ jobs:
 
             if [[ -f oImage ]]; then
               echo "KPM injection successful!"
-              # DTB birleştirmesi yapılmaz; sadece yamalı oImage sıkıştırılır
               gzip -c oImage > "$OUT_BOOT/Image.gz"
             else
               echo "Error: patch_linux oImage üretemedi!"
@@ -193,16 +197,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
 
-          # Cihaz kontrol kilidini kaldır
+          # Cihaz kontrol kilidini kaldır (Unsupported device hatasını engeller)
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
 
-          # Kesinleşen fiziksel boot adresi
+          # Kesinleşen fiziksel boot adresi (Bölüm bulamama hatasını engeller)
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' AnyKernel3/anykernel.sh
 
-          # KPM'li saf Image.gz dosyasını kopyala
+          # Yamalanmış saf Image.gz dosyasını kopyala
           cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
