@@ -401,7 +401,7 @@ jobs:
                   with open(asm_seccomp, "a") as f:
                       f.write("\n" + sc_header)
 
-          # su_mount_ns.c uyumluluğu (mount.h köprüsü + ksys_unshare -> sys_unshare)
+          # su_mount_ns.c uyumluluğu
           for mnt_file in get_unique_files("**/infra/su_mount_ns.c"):
               with open(mnt_file, "r") as f:
                   mc = f.read()
@@ -415,7 +415,17 @@ jobs:
               )
               with open(mnt_file, "w") as f:
                   f.write(prefix_unshare + mc)
-              print(f"[OK] su_mount_ns.c güncellendi: {mnt_file}")
+
+          # manager/pkg_observer.c Linux 4.14 stub
+          pkg_stub = (
+              "#include <linux/types.h>\n"
+              "int ksu_pkg_observer_init(void) { return 0; }\n"
+              "void ksu_pkg_observer_exit(void) {}\n"
+          )
+          for pkg_f in get_unique_files("**/manager/pkg_observer.c"):
+              with open(pkg_f, "w") as f:
+                  f.write(pkg_stub)
+              print(f"[OK] pkg_observer.c stublandı: {pkg_f}")
           '
 
       - name: Setup Configuration
