@@ -104,7 +104,7 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları (Tam ve Açık Python Motoru)
+          # 6. Linux 4.14 Uyumluluk Yamaları
           cat << 'EOF' > patch_compat.py
           import os, glob, re
 
@@ -159,7 +159,7 @@ jobs:
                       f.write(nofault_defs)
                   print("[OK] Global uaccess.h içine *_nofault makroları eklendi.")
 
-          # 6.4. KRİTİK: arch/arm64/include/asm/uaccess.h içine access_ok 2/3 Parametre Overload Yaması
+          # 6.4. arch/arm64/include/asm/uaccess.h içine access_ok 2/3 Parametre Overload Yaması
           uaccess = "arch/arm64/include/asm/uaccess.h"
           if os.path.exists(uaccess):
               with open(uaccess, "r") as f:
@@ -512,20 +512,21 @@ jobs:
                   with open(ap_file, "w") as f:
                       f.write("".join(clean_lines))
 
-          # 6.17. runtime/ksud_integration.c ve tüm ağaçta *_nofault dönüşümü
+          # 6.17. *_nofault dönüşümü ve genel uaccess.h enjeksiyonu
           for cf in all_c_files:
               with open(cf, "r") as f:
                   code = f.read()
-              if any(k in code for k in ["copy_from_user_nofault", "copy_to_user_nofault", "strncpy_from_user_nofault"]):
-                  code = code.replace("copy_from_user_nofault", "copy_from_user")
-                  code = code.replace("copy_to_user_nofault", "copy_to_user")
-                  code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
-                  if "<linux/uaccess.h>" not in code:
-                      code = "#include <linux/uaccess.h>\n" + code
-                  with open(cf, "w") as f:
-                      f.write(code)
+              # nofault dönüşümleri
+              code = code.replace("copy_from_user_nofault", "copy_from_user")
+              code = code.replace("copy_to_user_nofault", "copy_to_user")
+              code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
+              # strncpy_from_user veya copy_from/to_user kullanan tüm dosyalara uaccess.h ekle
+              if any(k in code for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in code:
+                  code = "#include <linux/uaccess.h>\n" + code
+              with open(cf, "w") as f:
+                  f.write(code)
 
-          # 6.18. SELinux: YALNIZCA SukiSU'nun selinux dosyalarına enjekte et (çekirdek ağacına dokunma)
+          # 6.18. SELinux: YALNIZCA SukiSU'nun selinux dosyalarına enjekte et
           ksu_selinux_header = (
               "#include <linux/security.h>\n"
               "struct task_security_struct;\n"
