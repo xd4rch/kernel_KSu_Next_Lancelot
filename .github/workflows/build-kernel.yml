@@ -111,7 +111,7 @@ jobs:
           def get_unique_files(pattern):
               return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
-          # 6.1. GLOBAL: compiler.h içine fallthrough ekle
+          # 6.1. GLOBAL: compiler.h fallthrough
           comp_h = "include/linux/compiler.h"
           if os.path.exists(comp_h):
               with open(comp_h, "r") as f:
@@ -121,7 +121,7 @@ jobs:
                       f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
                   print("[OK] Global fallthrough makrosu eklendi.")
 
-          # 6.2. GLOBAL: task_work.h içine TWA_* tanımları ekle
+          # 6.2. GLOBAL: task_work.h TWA_*
           tw_h = "include/linux/task_work.h"
           if os.path.exists(tw_h):
               with open(tw_h, "r") as f:
@@ -138,7 +138,7 @@ jobs:
                       f.write(tw_patch)
                   print("[OK] Global task_work_add TWA_* makroları eklendi.")
 
-          # 6.3. GLOBAL: uaccess.h içine *_nofault makroları ekle
+          # 6.3. GLOBAL: uaccess.h *_nofault tanımları
           uacc_global = "include/linux/uaccess.h"
           if os.path.exists(uacc_global):
               with open(uacc_global, "r") as f:
@@ -191,7 +191,6 @@ jobs:
               if "_SUKISU_SYSCALL_FN_T_" not in content:
                   with open(h_path, "w") as f:
                       f.write(patch_header + content)
-                  print(f"[OK] syscall_fn_t eklendi: {h_path}")
 
           asm_syscall = "arch/arm64/include/asm/syscall.h"
           if os.path.exists(asm_syscall):
@@ -200,7 +199,6 @@ jobs:
               if "_SUKISU_SYSCALL_FN_T_" not in ac:
                   with open(asm_syscall, "w") as f:
                       f.write(patch_header + ac)
-                  print("[OK] asm/syscall.h güncellendi.")
 
           # 6.6. init.c içine MODULE_IMPORT_NS
           ns_patch = (
@@ -214,24 +212,20 @@ jobs:
               if "MODULE_IMPORT_NS" not in content or "#define MODULE_IMPORT_NS" not in content:
                   with open(i_path, "w") as f:
                       f.write(ns_patch + content)
-                  print(f"[OK] MODULE_IMPORT_NS eklendi: {i_path}")
 
           # 6.7. Başlık köprüleri
           if not os.path.exists("include/linux/set_memory.h"):
               with open("include/linux/set_memory.h", "w") as f:
                   f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
-              print("[OK] include/linux/set_memory.h eklendi.")
 
           if not os.path.exists("include/linux/pgtable.h"):
               with open("include/linux/pgtable.h", "w") as f:
                   f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
-              print("[OK] include/linux/pgtable.h eklendi.")
 
           os.makedirs("include/uapi/linux", exist_ok=True)
           if not os.path.exists("include/uapi/linux/mount.h"):
               with open("include/uapi/linux/mount.h", "w") as f:
                   f.write("#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n")
-              print("[OK] include/uapi/linux/mount.h eklendi.")
 
           # 6.8. sucompat.c ve util.h uyumluluğu
           compat_header = (
@@ -277,7 +271,6 @@ jobs:
           for pkg_f in get_unique_files("**/manager/pkg_observer.c"):
               with open(pkg_f, "w") as f:
                   f.write(pkg_stub)
-              print(f"[OK] pkg_observer.c stublandı: {pkg_f}")
 
           # 6.10. patch_memory.c uyumluluğu
           pm_patch_header = (
@@ -516,17 +509,15 @@ jobs:
           for cf in all_c_files:
               with open(cf, "r") as f:
                   code = f.read()
-              # nofault dönüşümleri
               code = code.replace("copy_from_user_nofault", "copy_from_user")
               code = code.replace("copy_to_user_nofault", "copy_to_user")
               code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
-              # strncpy_from_user veya copy_from/to_user kullanan tüm dosyalara uaccess.h ekle
               if any(k in code for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in code:
                   code = "#include <linux/uaccess.h>\n" + code
               with open(cf, "w") as f:
                   f.write(code)
 
-          # 6.18. SELinux: YALNIZCA SukiSU'nun selinux dosyalarına enjekte et
+          # 6.18. SELinux: selinux.c için köprüler
           ksu_selinux_header = (
               "#include <linux/security.h>\n"
               "struct task_security_struct;\n"
@@ -542,19 +533,37 @@ jobs:
               "#define selinux_file(file) ((struct file_security_struct *)(file)->f_security)\n"
               "#endif\n\n"
           )
-          ksu_selinux_files = (
-              get_unique_files("drivers/kernelsu/selinux/*.c") |
-              get_unique_files("drivers/kernelsu/selinux/*.h") |
-              get_unique_files("KernelSU/kernel/selinux/*.c") |
-              get_unique_files("KernelSU/kernel/selinux/*.h")
-          )
-          for sf in ksu_selinux_files:
+          for sf in get_unique_files("**/selinux/selinux.c") | get_unique_files("**/selinux/selinux.h"):
               with open(sf, "r") as f:
                   sc = f.read()
               if "selinux_cred" in sc or "selinux_inode" in sc or "selinux_file" in sc:
                   with open(sf, "w") as f:
                       f.write(ksu_selinux_header + sc)
-                  print(f"[OK] SukiSU selinux modülü uyarlandı: {sf}")
+
+          # 6.19. SELinux: rules.c ve sepolicy.c Linux 4.14 için stublanması
+          # (4.14'te struct selinux_policy ve selinux_state.policy mimarisi yoktur, sepolicy yüklemesi ksud tarafından userspace'ten yapılır)
+          rules_stub = (
+              '#include <linux/types.h>\n'
+              'int ksu_load_rules(void) {\n'
+              '    return 0;\n'
+              '}\n'
+          )
+          for rf in get_unique_files("**/selinux/rules.c"):
+              with open(rf, "w") as f:
+                  f.write(rules_stub)
+              print(f"[OK] rules.c 4.14 için stublandı: {rf}")
+
+          sepol_stub = (
+              '#include <linux/types.h>\n'
+              'struct selinux_policy;\n'
+              'struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol) {\n'
+              '    return (void *)0;\n'
+              '}\n'
+          )
+          for spf in get_unique_files("**/selinux/sepolicy.c"):
+              with open(spf, "w") as f:
+                  f.write(sepol_stub)
+              print(f"[OK] sepolicy.c 4.14 için stublandı: {spf}")
           EOF
           python3 patch_compat.py
 
