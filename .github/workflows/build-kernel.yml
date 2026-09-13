@@ -65,6 +65,7 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
+          # Non-GKI 4.14 sistem çağrı kancaları (fs/exec.c, fs/open.c)
           if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
             git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
             echo "KSU_HOOKS_PATCH.patch işlendi."
@@ -76,12 +77,15 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
+          # 1. SukiSU kurulum betiğini çalıştır
           curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}" || true
 
+          # 2. drivers/kernelsu sembolik bağını kur
           if [ -d "KernelSU/kernel" ] && [ ! -d "drivers/kernelsu" ]; then
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
+          # 3. Kconfig bağımlılık engellerini temizle
           for kcfg in drivers/kernelsu/Kconfig KernelSU/kernel/Kconfig; do
             if [ -f "$kcfg" ]; then
               sed -i '/depends on.*KPROBES/s/^/# /' "$kcfg" || true
@@ -90,114 +94,466 @@ jobs:
             fi
           done
 
+          # 4. drivers/Kconfig içine SukiSU kaynağını bağla
           sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
+          # 5. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
+          # 6. Linux 4.14 Uyumluluk Yamaları (Tam ve Açık Python Motoru)
           cat << 'EOF' > patch_compat.py
-          import glob, os, re
+          import os, glob, re
 
-          def read_write(path_pattern, modifier):
-              for p in set(glob.glob(path_pattern, recursive=True)):
-                  rp = os.path.realpath(p)
-                  if not os.path.isfile(rp): continue
-                  with open(rp, 'r') as f: content = f.read()
-                  new_content = modifier(content)
-                  if new_content != content:
-                      with open(rp, 'w') as f: f.write(new_content)
+          def get_unique_files(pattern):
+              return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
-          # 1. Global kernel macro shims
-          with open("include/linux/compiler.h", "a") as f:
-              f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
-          with open("include/linux/task_work.h", "a") as f:
-              f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
-          with open("include/linux/uaccess.h", "a") as f:
-              f.write("\n#ifndef copy_from_user_nofault\n#define copy_from_user_nofault(d,s,n) copy_from_user(d,(const void __user *)(s),n)\n#define copy_to_user_nofault(d,s,n) copy_to_user((void __user *)(d),s,n)\n#define strncpy_from_user_nofault(d,s,n) strncpy_from_user(d,(const char __user *)(s),n)\n#endif\n")
+          # 6.1. GLOBAL: compiler.h içine fallthrough ekle
+          comp_h = "include/linux/compiler.h"
+          if os.path.exists(comp_h):
+              with open(comp_h, "r") as f:
+                  ch_c = f.read()
+              if "fallthrough" not in ch_c:
+                  with open(comp_h, "a") as f:
+                      f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
+                  print("[OK] Global fallthrough makrosu eklendi.")
 
-          # 2. Virtual compatibility headers
-          sh_map = {
-              "include/linux/set_memory.h": "#ifndef _SET_MEM_H\n#define _SET_MEM_H\n#include <asm/set_memory.h>\n#endif\n",
-              "include/linux/pgtable.h": "#ifndef _PGTABLE_H\n#define _PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
-              "include/uapi/linux/mount.h": "#ifndef _UAPI_MOUNT_H\n#define _UAPI_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n"
-          }
-          for p, h in sh_map.items():
-              os.makedirs(os.path.dirname(p), exist_ok=True)
-              if not os.path.exists(p):
-                  with open(p, "w") as f: f.write(h)
+          # 6.2. GLOBAL: task_work.h içine TWA_* tanımları ekle
+          tw_h = "include/linux/task_work.h"
+          if os.path.exists(tw_h):
+              with open(tw_h, "r") as f:
+                  tw_c = f.read()
+              if "TWA_RESUME" not in tw_c:
+                  tw_patch = (
+                      "\n#ifndef TWA_RESUME\n"
+                      "#define TWA_NONE 0\n"
+                      "#define TWA_RESUME 1\n"
+                      "#define TWA_SIGNAL 2\n"
+                      "#endif\n"
+                  )
+                  with open(tw_h, "a") as f:
+                      f.write(tw_patch)
+                  print("[OK] Global task_work_add TWA_* makroları eklendi.")
 
-          # 3. Type shims & stubs
-          fn_t = "#ifndef _SUKISU_FN_T\n#define _SUKISU_FN_T\nstruct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif\n"
-          read_write("**/syscall_hook.h", lambda c: fn_t + c if "_SUKISU_FN_T" not in c else c)
-          read_write("arch/arm64/include/asm/syscall.h", lambda c: fn_t + c if "_SUKISU_FN_T" not in c else c)
-          read_write("**/core/init.c", lambda c: "#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n" + c if "MODULE_IMPORT_NS" not in c else c)
-          read_write("**/hook/lsm_hook.c", lambda c: "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n")
-          read_write("**/manager/pkg_observer.c", lambda c: "int ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n")
+          # 6.3. GLOBAL: uaccess.h içine *_nofault makroları ekle
+          uacc_global = "include/linux/uaccess.h"
+          if os.path.exists(uacc_global):
+              with open(uacc_global, "r") as f:
+                  ug_c = f.read()
+              if "copy_from_user_nofault" not in ug_c:
+                  nofault_defs = (
+                      "\n#ifndef copy_from_user_nofault\n"
+                      "#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n"
+                      "#endif\n"
+                      "#ifndef copy_to_user_nofault\n"
+                      "#define copy_to_user_nofault(dst, src, size) copy_to_user((void __user *)(dst), src, size)\n"
+                      "#endif\n"
+                      "#ifndef strncpy_from_user_nofault\n"
+                      "#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n"
+                      "#endif\n"
+                  )
+                  with open(uacc_global, "a") as f:
+                      f.write(nofault_defs)
+                  print("[OK] Global uaccess.h içine *_nofault makroları eklendi.")
 
-          # 4. KSU general syscall & symbol compatibility
-          def ksu_generic(c):
-              c = c.replace("copy_from_user_nofault", "copy_from_user")
-              c = c.replace("copy_to_user_nofault", "copy_to_user")
-              c = c.replace("strncpy_from_user_nofault", "strncpy_from_user")
-              c = c.replace("ksys_close", "sys_close")
-              c = c.replace("ksys_unshare", "sys_unshare")
-              c = c.replace("__flush_icache_range", "flush_icache_range")
-              c = c.replace("copy_to_kernel_nofault", "probe_kernel_write")
-              c = re.sub(r'.*filter_count.*', '// filter_count', c)
-              return c
-          read_write("drivers/kernelsu/**/*.c", ksu_generic)
-          read_write("KernelSU/**/*.c", ksu_generic)
+          # 6.4. KRİTİK: arch/arm64/include/asm/uaccess.h içine access_ok 2/3 Parametre Overload Yaması
+          uaccess = "arch/arm64/include/asm/uaccess.h"
+          if os.path.exists(uaccess):
+              with open(uaccess, "r") as f:
+                  lines = f.readlines()
+              with open(uaccess, "w") as f:
+                  for line in lines:
+                      if "#define access_ok" in line and "__range_ok" in line:
+                          f.write("#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), size)\n")
+                          f.write("#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), size)\n")
+                          f.write("#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n")
+                          f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
+                      else:
+                          f.write(line)
+              print("[OK] asm/uaccess.h içine access_ok 2/3 parametre desteği eklendi.")
 
-          # 5. Specific subsystems
-          read_write("**/patch_memory.c", lambda c: "#include <linux/uaccess.h>\n#include <asm/cacheflush.h>\n#ifndef __pte_to_phys\n#define __pte_to_phys(p) ((phys_addr_t)pte_pfn(p)<<PAGE_SHIFT)\n#endif\n" + c)
-          read_write("drivers/kernelsu/policy/*.c", lambda c: "#include <linux/sched/task.h>\n" + c)
-          read_write("KernelSU/kernel/policy/*.c", lambda c: "#include <linux/sched/task.h>\n" + c)
-          read_write("**/event_queue.*", lambda c: "#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\ntypedef unsigned int __poll_t;\n#define EPOLLIN 1\n#define EPOLLHUP 0x10\n#define EPOLLRDNORM 0x40\n" + c)
-          read_write("**/seccomp_cache.*", lambda c: "#include <asm/unistd.h>\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n" + c)
+          # 6.5. syscall_hook.h içine typedef enjeksiyonu
+          patch_header = (
+              "#ifndef _SUKISU_SYSCALL_FN_T_\n"
+              "#define _SUKISU_SYSCALL_FN_T_\n"
+              "#include <linux/compiler.h>\n"
+              "#include <linux/types.h>\n"
+              "struct pt_regs;\n"
+              "typedef long (*syscall_fn_t)(const struct pt_regs *);\n"
+              "#endif /* _SUKISU_SYSCALL_FN_T_ */\n\n"
+          )
+          for h_path in get_unique_files("**/hook/syscall_hook.h"):
+              with open(h_path, "r") as f:
+                  content = f.read()
+              if "_SUKISU_SYSCALL_FN_T_" not in content:
+                  with open(h_path, "w") as f:
+                      f.write(patch_header + content)
+                  print(f"[OK] syscall_fn_t eklendi: {h_path}")
 
-          # 6. SELinux: ONLY inject into SukiSU tree
-          sel_head = "struct task_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n"
-          read_write("drivers/kernelsu/selinux/*.c", lambda c: sel_head + c)
-          read_write("KernelSU/kernel/selinux/*.c", lambda c: sel_head + c)
+          asm_syscall = "arch/arm64/include/asm/syscall.h"
+          if os.path.exists(asm_syscall):
+              with open(asm_syscall, "r") as f:
+                  ac = f.read()
+              if "_SUKISU_SYSCALL_FN_T_" not in ac:
+                  with open(asm_syscall, "w") as f:
+                      f.write(patch_header + ac)
+                  print("[OK] asm/syscall.h güncellendi.")
 
-          # 7. file_wrapper 4.14 VFS shim
-          fw_shim = """#ifndef _FW_414
-          #define _FW_414
-          #include <linux/version.h>
-          #include <linux/fs.h>
-          #include <linux/file.h>
-          #include <linux/dcache.h>
-          #include <linux/mount.h>
-          #include <linux/err.h>
-          typedef unsigned int __poll_t;
-          #define security_inode_init_security_anon(i,n,c) (0)
-          #define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)
-          static inline struct file *alloc_file_pseudo(struct inode *i, struct vfsmount *m, const char *n, int f, const struct file_operations *fops) {
-              struct qstr s = QSTR_INIT(n, strlen(n));
-              struct path p = { .dentry = d_alloc_pseudo(m->mnt_sb, &s), .mnt = mntget(m) };
-              if (!p.dentry) { iput(i); return ERR_PTR(-ENOMEM); }
-              d_instantiate(p.dentry, i);
-              return alloc_file(&p, (fmode_t)f, fops);
-          }
-          #endif
-          """
-          def fw_fix(c):
-              lines = []
-              skip = False
-              for l in c.splitlines(True):
-                  if any(x in l for x in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]):
-                      lines.append("// " + l)
-                  elif any(x in l for x in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]):
-                      skip = True
-                  elif skip:
-                      if l.startswith("}"): skip = False
+          # 6.6. init.c içine MODULE_IMPORT_NS
+          ns_patch = (
+              "#ifndef MODULE_IMPORT_NS\n"
+              "#define MODULE_IMPORT_NS(ns)\n"
+              "#endif\n\n"
+          )
+          for i_path in get_unique_files("**/core/init.c"):
+              with open(i_path, "r") as f:
+                  content = f.read()
+              if "MODULE_IMPORT_NS" not in content or "#define MODULE_IMPORT_NS" not in content:
+                  with open(i_path, "w") as f:
+                      f.write(ns_patch + content)
+                  print(f"[OK] MODULE_IMPORT_NS eklendi: {i_path}")
+
+          # 6.7. Başlık köprüleri
+          if not os.path.exists("include/linux/set_memory.h"):
+              with open("include/linux/set_memory.h", "w") as f:
+                  f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
+              print("[OK] include/linux/set_memory.h eklendi.")
+
+          if not os.path.exists("include/linux/pgtable.h"):
+              with open("include/linux/pgtable.h", "w") as f:
+                  f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
+              print("[OK] include/linux/pgtable.h eklendi.")
+
+          os.makedirs("include/uapi/linux", exist_ok=True)
+          if not os.path.exists("include/uapi/linux/mount.h"):
+              with open("include/uapi/linux/mount.h", "w") as f:
+                  f.write("#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n")
+              print("[OK] include/uapi/linux/mount.h eklendi.")
+
+          # 6.8. sucompat.c ve util.h uyumluluğu
+          compat_header = (
+              "#include <linux/syscalls.h>\n"
+              "#include <linux/uaccess.h>\n"
+              "#ifndef strncpy_from_user_nofault\n"
+              "#define strncpy_from_user_nofault strncpy_from_user\n"
+              "#endif\n"
+              "#ifndef ksys_close\n"
+              "#define ksys_close sys_close\n"
+              "#endif\n\n"
+          )
+          for su_file in get_unique_files("**/feature/sucompat.c"):
+              with open(su_file, "r") as f:
+                  sc = f.read()
+              sc = sc.replace("strncpy_from_user_nofault", "strncpy_from_user")
+              sc = sc.replace("ksys_close", "sys_close")
+              with open(su_file, "w") as f:
+                  f.write(compat_header + sc)
+
+          for util_h in get_unique_files("**/include/util.h"):
+              with open(util_h, "r") as f:
+                  uc = f.read()
+              uc = uc.replace("ksys_close", "sys_close")
+              with open(util_h, "w") as f:
+                  f.write(compat_header + uc)
+
+          # 6.9. lsm_hook.c ve manager/pkg_observer.c stubları
+          lsm_stub = (
+              "#include <linux/types.h>\n"
+              "int ksu_lsm_hook_init(void) { return 0; }\n"
+              "void ksu_lsm_hook_exit(void) {}\n"
+          )
+          for lsm_f in get_unique_files("**/hook/lsm_hook.c"):
+              with open(lsm_f, "w") as f:
+                  f.write(lsm_stub)
+
+          pkg_stub = (
+              "#include <linux/types.h>\n"
+              "int ksu_pkg_observer_init(void) { return 0; }\n"
+              "void ksu_pkg_observer_exit(void) {}\n"
+          )
+          for pkg_f in get_unique_files("**/manager/pkg_observer.c"):
+              with open(pkg_f, "w") as f:
+                  f.write(pkg_stub)
+              print(f"[OK] pkg_observer.c stublandı: {pkg_f}")
+
+          # 6.10. patch_memory.c uyumluluğu
+          pm_patch_header = (
+              "#include <linux/uaccess.h>\n"
+              "#include <asm/cacheflush.h>\n"
+              "#include <asm/pgtable.h>\n"
+              "#ifndef __pte_to_phys\n"
+              "#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n"
+              "#endif\n"
+              "#ifndef copy_to_kernel_nofault\n"
+              "#define copy_to_kernel_nofault probe_kernel_write\n"
+              "#endif\n\n"
+          )
+          for pm_file in get_unique_files("**/hook/arm64/patch_memory.c"):
+              with open(pm_file, "r") as f:
+                  pm_code = f.read()
+              pm_code = pm_code.replace("__flush_icache_range", "flush_icache_range")
+              pm_code = pm_code.replace("copy_to_kernel_nofault", "probe_kernel_write")
+              with open(pm_file, "w") as f:
+                  f.write(pm_patch_header + pm_code)
+
+          # 6.11. file_wrapper.c Linux 4.14 VFS uyumluluk köprüsü
+          fw_header = (
+              "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n"
+              "#define _SUKISU_FILE_WRAPPER_4_14_\n"
+              "#include <linux/version.h>\n"
+              "#include <linux/types.h>\n"
+              "#include <linux/fs.h>\n"
+              "#include <linux/file.h>\n"
+              "#include <linux/dcache.h>\n"
+              "#include <linux/mount.h>\n"
+              "#include <linux/security.h>\n"
+              "#include <linux/err.h>\n\n"
+              "#ifndef __poll_t\n"
+              "typedef unsigned int __poll_t;\n"
+              "#define __poll_t __poll_t\n"
+              "#endif\n\n"
+              "#ifndef REMAP_FILE_DEDUP\n"
+              "#define REMAP_FILE_DEDUP 0\n"
+              "#endif\n\n"
+              "static inline int security_inode_init_security_anon(struct inode *inode,\n"
+              "                                                   const struct qstr *name,\n"
+              "                                                   const struct inode *context_inode)\n"
+              "{\n"
+              "    (void)inode;\n"
+              "    (void)name;\n"
+              "    (void)context_inode;\n"
+              "    return 0;\n"
+              "}\n\n"
+              "#ifndef selinux_inode\n"
+              "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
+              "#endif\n\n"
+              "#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0)\n"
+              "static inline struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,\n"
+              "                                             const char *name, int flags,\n"
+              "                                             const struct file_operations *fops)\n"
+              "{\n"
+              "    struct qstr this = QSTR_INIT(name, strlen(name));\n"
+              "    struct path path;\n"
+              "    struct file *file;\n"
+              "    path.dentry = d_alloc_pseudo(mnt->mnt_sb, &this);\n"
+              "    if (!path.dentry) {\n"
+              "        iput(inode);\n"
+              "        return ERR_PTR(-ENOMEM);\n"
+              "    }\n"
+              "    path.mnt = mntget(mnt);\n"
+              "    d_instantiate(path.dentry, inode);\n"
+              "    file = alloc_file(&path, (fmode_t)flags, fops);\n"
+              "    if (IS_ERR(file)) {\n"
+              "        ihold(inode);\n"
+              "        path_put(&path);\n"
+              "    }\n"
+              "    return file;\n"
+              "}\n"
+              "#endif\n"
+              "#endif /* _SUKISU_FILE_WRAPPER_4_14_ */\n\n"
+          )
+          for fw_file in get_unique_files("**/infra/file_wrapper.c"):
+              with open(fw_file, "r") as f:
+                  content = f.read()
+              if "_SUKISU_FILE_WRAPPER_4_14_" not in content:
+                  lines = content.splitlines(True)
+                  new_lines = []
+                  skip_func = False
+                  for line in lines:
+                      if any(op in line for op in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]):
+                          new_lines.append("// [4.14 backport] " + line)
+                      elif any(fn in line for fn in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]):
+                          new_lines.append("// [4.14 backport] modern fops omitted\n")
+                          skip_func = True
+                      elif skip_func:
+                          if line.startswith("}"):
+                              skip_func = False
+                      else:
+                          new_lines.append(line)
+                  with open(fw_file, "w") as f:
+                      f.write(fw_header + "".join(new_lines))
+
+          # 6.12. event_queue ve poll uyumluluğu
+          poll_h = "include/linux/poll.h"
+          if os.path.exists(poll_h):
+              with open(poll_h, "r") as f:
+                  ph_c = f.read()
+              if "__poll_t" not in ph_c:
+                  ph_patch = (
+                      "\n#include <uapi/linux/eventpoll.h>\n"
+                      "#ifndef __poll_t\n"
+                      "typedef unsigned int __poll_t;\n"
+                      "#define __poll_t __poll_t\n"
+                      "#endif\n"
+                  )
+                  with open(poll_h, "a") as f:
+                      f.write(ph_patch)
+
+          eq_header = (
+              "#ifndef _SUKISU_EVENT_QUEUE_4_14_\n"
+              "#define _SUKISU_EVENT_QUEUE_4_14_\n"
+              "#include <linux/poll.h>\n"
+              "#include <uapi/linux/eventpoll.h>\n"
+              "#ifndef __poll_t\n"
+              "typedef unsigned int __poll_t;\n"
+              "#define __poll_t __poll_t\n"
+              "#endif\n"
+              "#ifndef EPOLLIN\n"
+              "#define EPOLLIN 0x00000001\n"
+              "#endif\n"
+              "#ifndef EPOLLHUP\n"
+              "#define EPOLLHUP 0x00000010\n"
+              "#endif\n"
+              "#ifndef EPOLLRDNORM\n"
+              "#define EPOLLRDNORM 0x00000040\n"
+              "#endif\n"
+              "#endif /* _SUKISU_EVENT_QUEUE_4_14_ */\n\n"
+          )
+          for eq_file in get_unique_files("**/infra/event_queue.*"):
+              with open(eq_file, "r") as f:
+                  content = f.read()
+              if "_SUKISU_EVENT_QUEUE_4_14_" not in content:
+                  with open(eq_file, "w") as f:
+                      f.write(eq_header + content)
+
+          # 6.13. seccomp_cache.c ve asm/seccomp.h uyumluluğu
+          sc_header = (
+              "#ifndef _SUKISU_SECCOMP_CACHE_4_14_\n"
+              "#define _SUKISU_SECCOMP_CACHE_4_14_\n"
+              "#include <asm/unistd.h>\n"
+              "#ifndef SECCOMP_ARCH_NATIVE_NR\n"
+              "#ifdef __NR_syscalls\n"
+              "#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n"
+              "#else\n"
+              "#define SECCOMP_ARCH_NATIVE_NR 512\n"
+              "#endif\n"
+              "#endif\n"
+              "#ifndef SECCOMP_ARCH_COMPAT_NR\n"
+              "#ifdef __NR_compat_syscalls\n"
+              "#define SECCOMP_ARCH_COMPAT_NR __NR_compat_syscalls\n"
+              "#else\n"
+              "#define SECCOMP_ARCH_COMPAT_NR 400\n"
+              "#endif\n"
+              "#endif\n"
+              "#endif /* _SUKISU_SECCOMP_CACHE_4_14_ */\n\n"
+          )
+          for sc_file in get_unique_files("**/infra/seccomp_cache.*"):
+              with open(sc_file, "r") as f:
+                  content = f.read()
+              if "_SUKISU_SECCOMP_CACHE_4_14_" not in content:
+                  with open(sc_file, "w") as f:
+                      f.write(sc_header + content)
+
+          asm_seccomp = "arch/arm64/include/asm/seccomp.h"
+          if os.path.exists(asm_seccomp):
+              with open(asm_seccomp, "r") as f:
+                  asc = f.read()
+              if "_SUKISU_SECCOMP_CACHE_4_14_" not in asc:
+                  with open(asm_seccomp, "a") as f:
+                      f.write("\n" + sc_header)
+
+          # 6.14. su_mount_ns.c uyumluluğu
+          for mnt_file in get_unique_files("**/infra/su_mount_ns.c"):
+              with open(mnt_file, "r") as f:
+                  mc = f.read()
+              mc = mc.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>\n#include <linux/syscalls.h>")
+              mc = mc.replace("ksys_unshare", "sys_unshare")
+              prefix_unshare = (
+                  "#include <linux/syscalls.h>\n"
+                  "#ifndef ksys_unshare\n"
+                  "#define ksys_unshare sys_unshare\n"
+                  "#endif\n\n"
+              )
+              with open(mnt_file, "w") as f:
+                  f.write(prefix_unshare + mc)
+
+          # 6.15. policy/allowlist.c ve put_task_struct uyumluluğu
+          allowlist_header = (
+              "#include <linux/sched/task.h>\n"
+              "#include <linux/task_work.h>\n"
+              "#include <linux/compiler.h>\n"
+              "#ifndef TWA_RESUME\n"
+              "#define TWA_RESUME 1\n"
+              "#endif\n"
+              "#ifndef fallthrough\n"
+              "#define fallthrough do {} while (0)\n"
+              "#endif\n\n"
+          )
+          for pol_f in get_unique_files("drivers/kernelsu/policy/*.c") | get_unique_files("KernelSU/kernel/policy/*.c"):
+              with open(pol_f, "r") as f:
+                  pol_c = f.read()
+              with open(pol_f, "w") as f:
+                  f.write(allowlist_header + pol_c)
+
+          all_c_files = get_unique_files("drivers/kernelsu/**/*.c") | get_unique_files("KernelSU/**/*.c")
+          for cf in all_c_files:
+              with open(cf, "r") as f:
+                  fc = f.read()
+              if "put_task_struct" in fc and "<linux/sched/task.h>" not in fc:
+                  with open(cf, "w") as f:
+                      f.write("#include <linux/sched/task.h>\n" + fc)
+
+          # 6.16. filter_count temizliği (4.14 seccomp uyumluluğu)
+          for ap_file in all_c_files:
+              with open(ap_file, "r") as f:
+                  ap_lines = f.readlines()
+              modified = False
+              clean_lines = []
+              for line in ap_lines:
+                  if "filter_count" in line:
+                      clean_lines.append("// [4.14 seccomp] " + line)
+                      modified = True
                   else:
-                      lines.append(l)
-              return fw_shim + "".join(lines)
-          read_write("**/file_wrapper.c", fw_fix)
+                      clean_lines.append(line)
+              if modified:
+                  with open(ap_file, "w") as f:
+                      f.write("".join(clean_lines))
+
+          # 6.17. runtime/ksud_integration.c ve tüm ağaçta *_nofault dönüşümü
+          for cf in all_c_files:
+              with open(cf, "r") as f:
+                  code = f.read()
+              if any(k in code for k in ["copy_from_user_nofault", "copy_to_user_nofault", "strncpy_from_user_nofault"]):
+                  code = code.replace("copy_from_user_nofault", "copy_from_user")
+                  code = code.replace("copy_to_user_nofault", "copy_to_user")
+                  code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
+                  if "<linux/uaccess.h>" not in code:
+                      code = "#include <linux/uaccess.h>\n" + code
+                  with open(cf, "w") as f:
+                      f.write(code)
+
+          # 6.18. SELinux: YALNIZCA SukiSU'nun selinux dosyalarına enjekte et (çekirdek ağacına dokunma)
+          ksu_selinux_header = (
+              "#include <linux/security.h>\n"
+              "struct task_security_struct;\n"
+              "struct inode_security_struct;\n"
+              "struct file_security_struct;\n"
+              "#ifndef selinux_cred\n"
+              "#define selinux_cred(cred) ((struct task_security_struct *)(cred)->security)\n"
+              "#endif\n"
+              "#ifndef selinux_inode\n"
+              "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
+              "#endif\n"
+              "#ifndef selinux_file\n"
+              "#define selinux_file(file) ((struct file_security_struct *)(file)->f_security)\n"
+              "#endif\n\n"
+          )
+          ksu_selinux_files = (
+              get_unique_files("drivers/kernelsu/selinux/*.c") |
+              get_unique_files("drivers/kernelsu/selinux/*.h") |
+              get_unique_files("KernelSU/kernel/selinux/*.c") |
+              get_unique_files("KernelSU/kernel/selinux/*.h")
+          )
+          for sf in ksu_selinux_files:
+              with open(sf, "r") as f:
+                  sc = f.read()
+              if "selinux_cred" in sc or "selinux_inode" in sc or "selinux_file" in sc:
+                  with open(sf, "w") as f:
+                      f.write(ksu_selinux_header + sc)
+                  print(f"[OK] SukiSU selinux modülü uyarlandı: {sf}")
           EOF
           python3 patch_compat.py
 
@@ -209,6 +565,7 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
+          # Bayrakları defconfig dosyasına ekle
           {
             echo "CONFIG_OVERLAY_FS=y"
             echo "CONFIG_KALLSYMS=y"
@@ -230,11 +587,16 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$DEFCONFIG_FILE"
 
+          # Defconfig dosyasını üret
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
+
+          # Clang bayrakları
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
+
           make ARCH=arm64 O=out olddefconfig
 
+          # Doğrulama
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -244,6 +606,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
 
+          # Ham Image derlemesi
           make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
@@ -286,12 +649,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
 
+          # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
+
+          # Kesinleşen fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' AnyKernel3/anykernel.sh
 
+          # Saf Image.gz dosyasını kopyala
           cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
