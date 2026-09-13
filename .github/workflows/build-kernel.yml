@@ -229,6 +229,9 @@ jobs:
           compat_header = (
               "#include <linux/syscalls.h>\n"
               "#include <linux/uaccess.h>\n"
+              "#ifndef strncpy_from_user_nofault\n"
+              "#define strncpy_from_user_nofault strncpy_from_user\n"
+              "#endif\n"
               "#ifndef ksys_close\n"
               "#define ksys_close sys_close\n"
               "#endif\n\n"
@@ -236,6 +239,7 @@ jobs:
           for su_file in get_unique_files("**/feature/sucompat.c"):
               with open(su_file, "r") as f:
                   sc = f.read()
+              sc = sc.replace("strncpy_from_user_nofault", "strncpy_from_user")
               sc = sc.replace("ksys_close", "sys_close")
               with open(su_file, "w") as f:
                   f.write(compat_header + sc)
@@ -459,4 +463,215 @@ jobs:
 
           # manager/pkg_observer.c Linux 4.14 stub
           pkg_stub = (
-              "#includ
+              "#include <linux/types.h>\n"
+              "int ksu_pkg_observer_init(void) { return 0; }\n"
+              "void ksu_pkg_observer_exit(void) {}\n"
+          )
+          for pkg_f in get_unique_files("**/manager/pkg_observer.c"):
+              with open(pkg_f, "w") as f:
+                  f.write(pkg_stub)
+
+          # policy/allowlist.c ve put_task_struct uyumluluğu
+          allowlist_header = (
+              "#include <linux/sched/task.h>\n"
+              "#include <linux/task_work.h>\n"
+              "#include <linux/compiler.h>\n"
+              "#ifndef TWA_RESUME\n"
+              "#define TWA_RESUME 1\n"
+              "#endif\n"
+              "#ifndef fallthrough\n"
+              "#define fallthrough do {} while (0)\n"
+              "#endif\n\n"
+          )
+          for pol_f in get_unique_files("**/policy/*.c"):
+              with open(pol_f, "r") as f:
+                  pol_c = f.read()
+              with open(pol_f, "w") as f:
+                  f.write(allowlist_header + pol_c)
+
+          for cf in all_c_files:
+              with open(cf, "r") as f:
+                  fc = f.read()
+              if "put_task_struct" in fc and "<linux/sched/task.h>" not in fc:
+                  with open(cf, "w") as f:
+                      f.write("#include <linux/sched/task.h>\n" + fc)
+
+          # filter_count temizliği
+          for ap_file in all_c_files:
+              with open(ap_file, "r") as f:
+                  ap_lines = f.readlines()
+              modified = False
+              clean_lines = []
+              for line in ap_lines:
+                  if "filter_count" in line:
+                      clean_lines.append("// [4.14 seccomp] " + line)
+                      modified = True
+                  else:
+                      clean_lines.append(line)
+              if modified:
+                  with open(ap_file, "w") as f:
+                      f.write("".join(clean_lines))
+
+          # runtime/ksud_integration.c ve tüm ağaçta *_nofault dönüşümü
+          for cf in all_c_files:
+              with open(cf, "r") as f:
+                  code = f.read()
+              if any(k in code for k in ["copy_from_user_nofault", "copy_to_user_nofault", "strncpy_from_user_nofault"]):
+                  code = code.replace("copy_from_user_nofault", "copy_from_user")
+                  code = code.replace("copy_to_user_nofault", "copy_to_user")
+                  code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
+                  if "<linux/uaccess.h>" not in code:
+                      code = "#include <linux/uaccess.h>\n" + code
+                  with open(cf, "w") as f:
+                      f.write(code)
+
+          # selinux uyumluluğu: selinux_cred, selinux_inode, selinux_file
+          objsec_h = "security/selinux/include/objsec.h"
+          if os.path.exists(objsec_h):
+              with open(objsec_h, "r") as f:
+                  oc = f.read()
+              if "selinux_cred" not in oc:
+                  selinux_helper = (
+                      "\n#ifndef selinux_cred\n"
+                      "static inline struct task_security_struct *selinux_cred(const struct cred *cred)\n"
+                      "{\n"
+                      "    return (struct task_security_struct *)cred->security;\n"
+                      "}\n"
+                      "#endif\n"
+                  )
+                  with open(objsec_h, "a") as f:
+                      f.write(selinux_helper)
+
+          selinux_compat_header = (
+              "#include <linux/security.h>\n"
+              "struct task_security_struct;\n"
+              "#ifndef selinux_cred\n"
+              "#define selinux_cred(cred) ((struct task_security_struct *)(cred)->security)\n"
+              "#endif\n"
+              "#ifndef selinux_inode\n"
+              "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
+              "#endif\n"
+              "#ifndef selinux_file\n"
+              "#define selinux_file(file) ((struct file_security_struct *)(file)->f_security)\n"
+              "#endif\n\n"
+          )
+          for sf in get_unique_files("**/selinux/*.c") | get_unique_files("**/selinux/*.h"):
+              with open(sf, "r") as f:
+                  sc = f.read()
+              if "selinux_cred" in sc or "selinux_inode" in sc or "selinux_file" in sc:
+                  with open(sf, "w") as f:
+                      f.write(selinux_compat_header + sc)
+                  print(f"[OK] selinux modülü uyarlandı: {sf}")
+          '
+
+      - name: Setup Configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+          DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
+
+          # Bayrakları defconfig dosyasına temiz şekilde ekle
+          {
+            echo "CONFIG_OVERLAY_FS=y"
+            echo "CONFIG_KALLSYMS=y"
+            echo "CONFIG_KALLSYMS_ALL=y"
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "CONFIG_KPM=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          } >> "$DEFCONFIG_FILE"
+
+          # Defconfig dosyasını üret
+          make ARCH=arm64 O=out "${DEVICE}_defconfig"
+
+          # Clang uyumluluk bayrakları
+          ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+          ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
+
+          # Yapılandırmayı senkronize et
+          make ARCH=arm64 O=out olddefconfig
+
+          # Doğrulama
+          grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
+
+      - name: Build Raw Kernel Image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
+
+          # Ham Image derlemesi
+          make -j"$(nproc --all)" \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image
+
+      - name: Patch SukiSU Ultra KPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_BOOT="$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot"
+          if [[ "${{ env.KPM_SUPPORT }}" == "true" ]]; then
+            mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+            cd "$GITHUB_WORKSPACE/kernel_workspace/SukiSU-Patch"
+
+            wget -nv -O patch_linux "${{ env.KPM_URL }}" || wget -nv "${{ env.KPM_URL }}"
+            chmod +x patch_linux
+            cp "$OUT_BOOT/Image" .
+
+            ./patch_linux
+
+            if [[ -f oImage ]]; then
+              echo "KPM injection successful!"
+              gzip -c oImage > "$OUT_BOOT/Image.gz"
+            else
+              echo "Error: patch_linux oImage üretemedi!"
+              exit 1
+            fi
+          else
+            gzip -c "$OUT_BOOT/Image" > "$OUT_BOOT/Image.gz"
+          fi
+
+      - name: Prepare AnyKernel3
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
+
+          # Cihaz kontrol kilidini kaldır
+          sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
+
+          # Kesinleşen fiziksel boot adresi
+          sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
+          sed -i -E 's|^[# ]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' AnyKernel3/anykernel.sh
+
+          # Saf Image.gz dosyasını kopyala
+          cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+          rm -rf AnyKernel3/.git* AnyKernel3/README.md
+
+      - name: Upload SukiSU AnyKernel3 Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: SukiSU-Ultra-Lancelot-LOS20-${{ env.BUILD_TIME }}
+          path: kernel_workspace/AnyKernel3/*
