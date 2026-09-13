@@ -119,7 +119,6 @@ jobs:
               if "fallthrough" not in ch_c:
                   with open(comp_h, "a") as f:
                       f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
-                  print("[OK] Global fallthrough makrosu eklendi.")
 
           # 6.2. GLOBAL: task_work.h TWA_*
           tw_h = "include/linux/task_work.h"
@@ -136,7 +135,6 @@ jobs:
                   )
                   with open(tw_h, "a") as f:
                       f.write(tw_patch)
-                  print("[OK] Global task_work_add TWA_* makroları eklendi.")
 
           # 6.3. GLOBAL: uaccess.h *_nofault tanımları
           uacc_global = "include/linux/uaccess.h"
@@ -157,7 +155,6 @@ jobs:
                   )
                   with open(uacc_global, "a") as f:
                       f.write(nofault_defs)
-                  print("[OK] Global uaccess.h içine *_nofault makroları eklendi.")
 
           # 6.4. arch/arm64/include/asm/uaccess.h içine access_ok 2/3 Parametre Overload Yaması
           uaccess = "arch/arm64/include/asm/uaccess.h"
@@ -173,7 +170,6 @@ jobs:
                           f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
                       else:
                           f.write(line)
-              print("[OK] asm/uaccess.h içine access_ok 2/3 parametre desteği eklendi.")
 
           # 6.5. syscall_hook.h içine typedef enjeksiyonu
           patch_header = (
@@ -213,19 +209,18 @@ jobs:
                   with open(i_path, "w") as f:
                       f.write(ns_patch + content)
 
-          # 6.7. Başlık köprüleri
-          if not os.path.exists("include/linux/set_memory.h"):
-              with open("include/linux/set_memory.h", "w") as f:
-                  f.write("#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n")
-
-          if not os.path.exists("include/linux/pgtable.h"):
-              with open("include/linux/pgtable.h", "w") as f:
-                  f.write("#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n")
-
-          os.makedirs("include/uapi/linux", exist_ok=True)
-          if not os.path.exists("include/uapi/linux/mount.h"):
-              with open("include/uapi/linux/mount.h", "w") as f:
-                  f.write("#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n")
+          # 6.7. Başlık köprüleri (minmax.h dahil)
+          sh_map = {
+              "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
+              "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
+              "include/uapi/linux/mount.h": "#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n",
+              "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n"
+          }
+          for p, h in sh_map.items():
+              os.makedirs(os.path.dirname(p), exist_ok=True)
+              if not os.path.exists(p):
+                  with open(p, "w") as f:
+                      f.write(h)
 
           # 6.8. sucompat.c ve util.h uyumluluğu
           compat_header = (
@@ -505,13 +500,14 @@ jobs:
                   with open(ap_file, "w") as f:
                       f.write("".join(clean_lines))
 
-          # 6.17. *_nofault dönüşümü ve genel uaccess.h enjeksiyonu
+          # 6.17. *_nofault dönüşümü, minmax.h köprüsü ve uaccess.h enjeksiyonu
           for cf in all_c_files:
               with open(cf, "r") as f:
                   code = f.read()
               code = code.replace("copy_from_user_nofault", "copy_from_user")
               code = code.replace("copy_to_user_nofault", "copy_to_user")
               code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
+              code = code.replace("<linux/minmax.h>", "<linux/kernel.h>")
               if any(k in code for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in code:
                   code = "#include <linux/uaccess.h>\n" + code
               with open(cf, "w") as f:
@@ -541,7 +537,6 @@ jobs:
                       f.write(ksu_selinux_header + sc)
 
           # 6.19. SELinux: rules.c ve sepolicy.c Linux 4.14 için stublanması
-          # (4.14'te struct selinux_policy ve selinux_state.policy mimarisi yoktur, sepolicy yüklemesi ksud tarafından userspace'ten yapılır)
           rules_stub = (
               '#include <linux/types.h>\n'
               'int ksu_load_rules(void) {\n'
@@ -551,7 +546,6 @@ jobs:
           for rf in get_unique_files("**/selinux/rules.c"):
               with open(rf, "w") as f:
                   f.write(rules_stub)
-              print(f"[OK] rules.c 4.14 için stublandı: {rf}")
 
           sepol_stub = (
               '#include <linux/types.h>\n'
@@ -563,7 +557,6 @@ jobs:
           for spf in get_unique_files("**/selinux/sepolicy.c"):
               with open(spf, "w") as f:
                   f.write(sepol_stub)
-              print(f"[OK] sepolicy.c 4.14 için stublandı: {spf}")
           EOF
           python3 patch_compat.py
 
