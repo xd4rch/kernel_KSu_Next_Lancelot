@@ -136,25 +136,6 @@ jobs:
                   )
                   with open(uacc_global, "a") as f: f.write(defs)
 
-          # poll.h global __poll_t ve EPOLL tanımları
-          poll_global = "include/linux/poll.h"
-          if os.path.exists(poll_global):
-              with open(poll_global, "r") as f: c = f.read()
-              if "typedef unsigned int __poll_t" not in c:
-                  p_defs = (
-                      "\n#include <uapi/linux/eventpoll.h>\n"
-                      "#ifndef __poll_t\n"
-                      "typedef unsigned int __poll_t;\n"
-                      "#define __poll_t __poll_t\n"
-                      "#endif\n"
-                      "#ifndef EPOLLIN\n"
-                      "#define EPOLLIN 0x00000001\n"
-                      "#define EPOLLHUP 0x00000010\n"
-                      "#define EPOLLRDNORM 0x00000040\n"
-                      "#endif\n"
-                  )
-                  with open(poll_global, "a") as f: f.write(p_defs)
-
           # asm/uaccess.h access_ok overload
           uaccess = "arch/arm64/include/asm/uaccess.h"
           if os.path.exists(uaccess):
@@ -251,26 +232,21 @@ jobs:
                   else: out.append(l)
               with open(fw, "w") as f: f.write(fw_h + "".join(out))
 
-          # 5. event_queue.h ve event_queue.c KOŞULSUZ __poll_t ve EPOLL enjeksiyonu
+          # 5. event_queue.h ve event_queue.c izole __poll_t köprüsü
           eq_head = (
               "#ifndef _SUKISU_EQ_FIX_\n#define _SUKISU_EQ_FIX_\n"
               "#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\n"
-              "#ifndef __poll_t\n"
               "typedef unsigned int __poll_t;\n"
-              "#define __poll_t __poll_t\n"
-              "#endif\n"
-              "#ifndef EPOLLIN\n"
-              "#define EPOLLIN 0x00000001\n"
-              "#define EPOLLHUP 0x00000010\n"
-              "#define EPOLLRDNORM 0x00000040\n"
-              "#endif\n"
+              "#ifndef EPOLLIN\n#define EPOLLIN 0x00000001\n#endif\n"
+              "#ifndef EPOLLHUP\n#define EPOLLHUP 0x00000010\n#endif\n"
+              "#ifndef EPOLLRDNORM\n#define EPOLLRDNORM 0x00000040\n#endif\n"
               "#endif /* _SUKISU_EQ_FIX_ */\n\n"
           )
           for eq in get_files("**/infra/event_queue.*"):
               with open(eq, "r") as f: c = f.read()
               if "_SUKISU_EQ_FIX_" not in c:
                   with open(eq, "w") as f: f.write(eq_head + c)
-                  print(f"[OK] event_queue fixlendi: {eq}")
+                  print(f"[OK] event_queue izole fixlendi: {eq}")
 
           for sc in get_files("**/infra/seccomp_cache.*"):
               with open(sc, "r") as f: c = f.read()
@@ -282,7 +258,7 @@ jobs:
               c = c.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>\n#include <linux/syscalls.h>").replace("ksys_unshare", "sys_unshare")
               with open(mn, "w") as f: f.write("#include <linux/syscalls.h>\n#ifndef ksys_unshare\n#define ksys_unshare sys_unshare\n#endif\n" + c)
 
-          # 6. Tüm C dosyalarında ortak temizlik (*_nofault, filter_count, uaccess, sched)
+          # 6. Ortak temizlikler (*_nofault, filter_count, uaccess, sched)
           all_c = get_files("drivers/kernelsu/**/*.c") | get_files("KernelSU/**/*.c")
           sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
           for cf in all_c:
@@ -366,7 +342,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
 
-          # Ham Image derlemesi
+          # Ham Image derlemesi (KCFLAGS ile mükerrer typedef uyarısı kilitlenmesini önlüyoruz)
           make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
@@ -374,6 +350,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            KCFLAGS="-Wno-typedef-redefinition" \
             Image
 
       - name: Patch SukiSU Ultra KPM
