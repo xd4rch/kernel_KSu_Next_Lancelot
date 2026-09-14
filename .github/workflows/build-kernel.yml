@@ -240,7 +240,7 @@ jobs:
               if "SECCOMP_ARCH_NATIVE_NR" not in c:
                   with open(sc, "w") as f: f.write("#include <asm/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#endif\n" + c)
 
-          # 6. Ortak temizlikler (*_nofault, filter_count, seccomp_filter_release, uaccess, sched)
+          # 6. Ortak temizlikler (*_nofault, filter_count, uaccess, sched)
           all_c = get_files("drivers/kernelsu/**/*.c") | get_files("KernelSU/**/*.c")
           sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
           for cf in all_c:
@@ -248,7 +248,6 @@ jobs:
               c = c.replace("copy_from_user_nofault", "copy_from_user").replace("copy_to_user_nofault", "copy_to_user").replace("strncpy_from_user_nofault", "strncpy_from_user")
               c = c.replace("<linux/minmax.h>", "<linux/kernel.h>")
               c = re.sub(r'.*filter_count.*', '// [4.14 seccomp]', c)
-              c = re.sub(r'seccomp_filter_release\([^)]*\);', '// seccomp_filter_release', c)
               if any(k in c for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in c:
                   c = "#include <linux/uaccess.h>\n" + c
               if "put_task_struct" in c and "<linux/sched/task.h>" not in c:
@@ -257,13 +256,25 @@ jobs:
                   c = sched_b + c
               with open(cf, "w") as f: f.write(c)
 
-          # 7. SELinux: selinux.c köprüsü
+          # 7. policy/app_profile.c içine seccomp_filter_release tanımı (regex yerine doğrudan fonksiyon gövdesi)
+          seccomp_stub = (
+              "\n/* [4.14 seccomp bridge] */\n"
+              "struct seccomp_filter;\n"
+              "void seccomp_filter_release(struct seccomp_filter *orig) {}\n"
+          )
+          for ap in get_files("**/policy/app_profile.c"):
+              with open(ap, "r") as f: c = f.read()
+              if "void seccomp_filter_release(struct seccomp_filter *orig) {}" not in c:
+                  with open(ap, "a") as f: f.write(seccomp_stub)
+                  print(f"[OK] seccomp_filter_release gövdesi eklendi: {ap}")
+
+          # 8. SELinux: selinux.c köprüsü
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
           for sf in get_files("**/selinux/selinux.c"):
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # 8. 4.14 Uyumsuz Modül Stubları (Eksiksiz Sembol Tanımları)
+          # 9. 4.14 Uyumsuz Modül Stubları (Eksiksiz Semboller)
           stub_dict = {
               "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "**/manager/pkg_observer.c": "int ksu_observer_init(void){return 0;}\nvoid ksu_observer_exit(void){}\nint ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n",
@@ -325,7 +336,6 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
 
-          # Ham Image derlemesi (Mali typedef uyarısını yok sayar)
           make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
