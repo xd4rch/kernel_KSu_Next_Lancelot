@@ -213,12 +213,13 @@ jobs:
                   with open(i_path, "w") as f:
                       f.write(ns_patch + content)
 
-          # 6.7. Başlık köprüleri (minmax.h dahil)
+          # 6.7. Başlık köprüleri (minmax.h ve vdso/datapage.h dahil)
           sh_map = {
               "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
               "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
               "include/uapi/linux/mount.h": "#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n",
-              "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n"
+              "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n",
+              "include/vdso/datapage.h": "#ifndef _VDSO_DATAPAGE_H\n#define _VDSO_DATAPAGE_H\n#endif\n"
           }
           for p, h in sh_map.items():
               os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -343,7 +344,7 @@ jobs:
               "        path_put(&path);\n"
               "    }\n"
               "    return file;\n"
-              "}\n\n"
+              "}\n"
               "#endif\n"
               "#endif /* _SUKISU_FILE_WRAPPER_4_14_ */\n\n"
           )
@@ -580,7 +581,6 @@ jobs:
                           f.write(sched_bridge + code)
 
           # 6.21. feature/selinux_hide.c Linux 4.14 stublanması
-          # (4.14'te selinux_state.status_lock, status_page ve backup_sepolicy yapıları yoktur)
           sh_stubs = [
               "int ksu_selinux_hide_init(void) { return 0; }",
               "void ksu_selinux_hide_exit(void) {}",
@@ -588,7 +588,7 @@ jobs:
               "int ksu_set_selinux_hide(bool enable) { return 0; }",
               "int ksu_get_selinux_hide(void) { return 0; }"
           ]
-          extra_funcs = set()
+          extra_funcs_sh = set()
           for h_or_c in get_unique_files("**/selinux_hide.*"):
               with open(h_or_c, "r") as f:
                   code_text = f.read()
@@ -606,19 +606,57 @@ jobs:
                       r_val = 'return false;'
                   else:
                       r_val = 'return 0;'
-                  extra_funcs.add(f"{ret_t} {fn_name}({fn_args}) {{ {r_val} }}")
+                  extra_funcs_sh.add(f"{ret_t} {fn_name}({fn_args}) {{ {r_val} }}")
 
-          stub_content = (
+          stub_content_sh = (
               "#include <linux/types.h>\n"
               "#include <linux/stddef.h>\n"
               "struct selinux_policy;\n"
               "struct selinux_state;\n\n" +
-              "\n".join(sh_stubs + list(extra_funcs)) + "\n"
+              "\n".join(sh_stubs + list(extra_funcs_sh)) + "\n"
           )
           for sh_c in get_unique_files("**/feature/selinux_hide.c"):
               with open(sh_c, "w") as f:
-                  f.write(stub_content)
+                  f.write(stub_content_sh)
               print(f"[OK] selinux_hide.c stublandı: {sh_c}")
+
+          # 6.22. feature/cpu_spoof.c Linux 4.14 stublanması
+          cs_stubs = [
+              "int ksu_cpu_spoof_init(void) { return 0; }",
+              "void ksu_cpu_spoof_exit(void) {}",
+              "bool ksu_is_cpu_spoof_enabled(void) { return false; }",
+              "int ksu_set_cpu_spoof(bool enable) { return 0; }",
+              "int ksu_get_cpu_spoof(void) { return 0; }"
+          ]
+          extra_funcs_cs = set()
+          for h_or_c in get_unique_files("**/cpu_spoof.*"):
+              with open(h_or_c, "r") as f:
+                  code_text = f.read()
+              for m in re.finditer(r'^(?:extern\s+)?([a-zA-Z_][a-zA-Z0-9_*\s]*?)\s+(ksu_[a-zA-Z0-9_]+)\s*\(([^)]*)\)', code_text, re.MULTILINE):
+                  ret_t = m.group(1).strip()
+                  fn_name = m.group(2).strip()
+                  fn_args = m.group(3).strip()
+                  if 'static' in ret_t or fn_name in [s.split('(')[0].split()[-1] for s in cs_stubs]:
+                      continue
+                  if ret_t == 'void':
+                      r_val = ''
+                  elif '*' in ret_t:
+                      r_val = 'return (void *)0;'
+                  elif ret_t in ['bool', '_Bool']:
+                      r_val = 'return false;'
+                  else:
+                      r_val = 'return 0;'
+                  extra_funcs_cs.add(f"{ret_t} {fn_name}({fn_args}) {{ {r_val} }}")
+
+          stub_content_cs = (
+              "#include <linux/types.h>\n"
+              "#include <linux/stddef.h>\n\n" +
+              "\n".join(cs_stubs + list(extra_funcs_cs)) + "\n"
+          )
+          for cs_c in get_unique_files("**/feature/cpu_spoof.c"):
+              with open(cs_c, "w") as f:
+                  f.write(stub_content_cs)
+              print(f"[OK] cpu_spoof.c stublandı: {cs_c}")
           EOF
           python3 patch_compat.py
 
