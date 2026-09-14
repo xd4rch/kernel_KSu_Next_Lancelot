@@ -77,15 +77,12 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          # 1. SukiSU kurulum betiğini çalıştır
           curl -LSs "${{ env.KERNELSU_SETUP_SOURCE }}" | bash -s "${{ env.KERNELSU_TAG }}" || true
 
-          # 2. drivers/kernelsu sembolik bağını kur
           if [ -d "KernelSU/kernel" ] && [ ! -d "drivers/kernelsu" ]; then
             ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
-          # 3. Kconfig bağımlılık engellerini temizle
           for kcfg in drivers/kernelsu/Kconfig KernelSU/kernel/Kconfig; do
             if [ -f "$kcfg" ]; then
               sed -i '/depends on.*KPROBES/s/^/# /' "$kcfg" || true
@@ -94,7 +91,6 @@ jobs:
             fi
           done
 
-          # 4. drivers/Kconfig ve drivers/Makefile bağlantısı
           sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
@@ -103,7 +99,6 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 5. Çekirdek Seviyesi Genel Başlık Yamaları (Global Shims)
           cat << 'EOF' > patch_core_headers.py
           import os
 
@@ -140,6 +135,25 @@ jobs:
                       "#endif\n"
                   )
                   with open(uacc_global, "a") as f: f.write(defs)
+
+          # poll.h global __poll_t ve EPOLL tanımları
+          poll_global = "include/linux/poll.h"
+          if os.path.exists(poll_global):
+              with open(poll_global, "r") as f: c = f.read()
+              if "typedef unsigned int __poll_t" not in c:
+                  p_defs = (
+                      "\n#include <uapi/linux/eventpoll.h>\n"
+                      "#ifndef __poll_t\n"
+                      "typedef unsigned int __poll_t;\n"
+                      "#define __poll_t __poll_t\n"
+                      "#endif\n"
+                      "#ifndef EPOLLIN\n"
+                      "#define EPOLLIN 0x00000001\n"
+                      "#define EPOLLHUP 0x00000010\n"
+                      "#define EPOLLRDNORM 0x00000040\n"
+                      "#endif\n"
+                  )
+                  with open(poll_global, "a") as f: f.write(p_defs)
 
           # asm/uaccess.h access_ok overload
           uaccess = "arch/arm64/include/asm/uaccess.h"
@@ -237,11 +251,26 @@ jobs:
                   else: out.append(l)
               with open(fw, "w") as f: f.write(fw_h + "".join(out))
 
-          # 5. event_queue & seccomp_cache & su_mount_ns
+          # 5. event_queue.h ve event_queue.c KOŞULSUZ __poll_t ve EPOLL enjeksiyonu
+          eq_head = (
+              "#ifndef _SUKISU_EQ_FIX_\n#define _SUKISU_EQ_FIX_\n"
+              "#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\n"
+              "#ifndef __poll_t\n"
+              "typedef unsigned int __poll_t;\n"
+              "#define __poll_t __poll_t\n"
+              "#endif\n"
+              "#ifndef EPOLLIN\n"
+              "#define EPOLLIN 0x00000001\n"
+              "#define EPOLLHUP 0x00000010\n"
+              "#define EPOLLRDNORM 0x00000040\n"
+              "#endif\n"
+              "#endif /* _SUKISU_EQ_FIX_ */\n\n"
+          )
           for eq in get_files("**/infra/event_queue.*"):
               with open(eq, "r") as f: c = f.read()
-              if "__poll_t" not in c:
-                  with open(eq, "w") as f: f.write("#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\ntypedef unsigned int __poll_t;\n#define EPOLLIN 1\n#define EPOLLHUP 0x10\n#define EPOLLRDNORM 0x40\n" + c)
+              if "_SUKISU_EQ_FIX_" not in c:
+                  with open(eq, "w") as f: f.write(eq_head + c)
+                  print(f"[OK] event_queue fixlendi: {eq}")
 
           for sc in get_files("**/infra/seccomp_cache.*"):
               with open(sc, "r") as f: c = f.read()
@@ -275,7 +304,7 @@ jobs:
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # 8. 4.14 Uyumsuz Modül Stubları (GKI modüllerinin güvenli kabukları)
+          # 8. 4.14 Uyumsuz Modül Stubları
           stub_dict = {
               "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "**/manager/pkg_observer.c": "int ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n",
@@ -321,16 +350,13 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$DEFCONFIG_FILE"
 
-          # Defconfig dosyasını üret
           make ARCH=arm64 O=out "${DEVICE}_defconfig"
 
-          # Clang bayrakları
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
 
           make ARCH=arm64 O=out olddefconfig
 
-          # Doğrulama
           grep -E "^CONFIG_KSU=y" out/.config || (echo "HATA: CONFIG_KSU defconfig tarafından silindi!" && exit 1)
 
       - name: Build Raw Kernel Image
@@ -383,16 +409,12 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone "${{ env.ANYKERNEL3_SOURCE }}" -b "${{ env.ANYKERNEL3_BRANCH }}" --depth=1 AnyKernel3
 
-          # Cihaz kontrol kilidini kaldır
           sed -i -E 's|^[# ]*do\.devicecheck=.*|do.devicecheck=0|g' AnyKernel3/anykernel.sh
-
-          # Kesinleşen fiziksel boot adresi
           sed -i -E 's|^[# ]*block=.*|block=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*BLOCK=.*|BLOCK=/dev/block/mmcblk0p34;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*is_slot_device=.*|is_slot_device=0;|g' AnyKernel3/anykernel.sh
           sed -i -E 's|^[# ]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' AnyKernel3/anykernel.sh
 
-          # Saf Image.gz dosyasını kopyala
           cp android-kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
