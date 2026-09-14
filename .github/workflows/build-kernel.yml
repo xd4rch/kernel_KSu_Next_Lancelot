@@ -119,6 +119,7 @@ jobs:
               if "fallthrough" not in ch_c:
                   with open(comp_h, "a") as f:
                       f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
+                  print("[OK] Global fallthrough makrosu eklendi.")
 
           # 6.2. GLOBAL: task_work.h TWA_*
           tw_h = "include/linux/task_work.h"
@@ -135,6 +136,7 @@ jobs:
                   )
                   with open(tw_h, "a") as f:
                       f.write(tw_patch)
+                  print("[OK] Global task_work_add TWA_* makroları eklendi.")
 
           # 6.3. GLOBAL: uaccess.h *_nofault tanımları
           uacc_global = "include/linux/uaccess.h"
@@ -155,6 +157,7 @@ jobs:
                   )
                   with open(uacc_global, "a") as f:
                       f.write(nofault_defs)
+                  print("[OK] Global uaccess.h içine *_nofault makroları eklendi.")
 
           # 6.4. arch/arm64/include/asm/uaccess.h içine access_ok 2/3 Parametre Overload Yaması
           uaccess = "arch/arm64/include/asm/uaccess.h"
@@ -170,6 +173,7 @@ jobs:
                           f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
                       else:
                           f.write(line)
+              print("[OK] asm/uaccess.h içine access_ok 2/3 parametre desteği eklendi.")
 
           # 6.5. syscall_hook.h içine typedef enjeksiyonu
           patch_header = (
@@ -339,7 +343,7 @@ jobs:
               "        path_put(&path);\n"
               "    }\n"
               "    return file;\n"
-              "}\n"
+              "}\n\n"
               "#endif\n"
               "#endif /* _SUKISU_FILE_WRAPPER_4_14_ */\n\n"
           )
@@ -536,7 +540,7 @@ jobs:
                   with open(sf, "w") as f:
                       f.write(ksu_selinux_header + sc)
 
-          # 6.19. SELinux: rules.c ve sepolicy.c Linux 4.14 için stublanması
+          # 6.19. SELinux: rules.c ve sepolicy.c stubları
           rules_stub = (
               '#include <linux/types.h>\n'
               'int ksu_load_rules(void) {\n'
@@ -557,6 +561,24 @@ jobs:
           for spf in get_unique_files("**/selinux/sepolicy.c"):
               with open(spf, "w") as f:
                   f.write(sepol_stub)
+
+          # 6.20. supercall/dispatch.c ve tüm ağaçta tasklist_lock & init_task köprüleri
+          sched_bridge = (
+              "#include <linux/sched.h>\n"
+              "#include <linux/sched/task.h>\n"
+              "#include <linux/sched/signal.h>\n"
+              "#include <linux/init_task.h>\n"
+              "extern rwlock_t tasklist_lock;\n"
+              "extern struct task_struct init_task;\n\n"
+          )
+          for cf in all_c_files:
+              with open(cf, "r") as f:
+                  code = f.read()
+              if "tasklist_lock" in code or "init_task" in code:
+                  if "extern rwlock_t tasklist_lock" not in code:
+                      with open(cf, "w") as f:
+                          f.write(sched_bridge + code)
+                      print(f"[OK] tasklist_lock ve init_task köprüsü eklendi: {cf}")
           EOF
           python3 patch_compat.py
 
