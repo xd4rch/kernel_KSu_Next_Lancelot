@@ -71,7 +71,7 @@ jobs:
             echo "KSU_HOOKS_PATCH.patch işlendi."
           fi
 
-      - name: Setup SukiSU Ultra (SUSFS) Driver
+      - name: Setup SukiSU Source & Core Headers
         shell: bash
         run: |
           set -euo pipefail
@@ -94,57 +94,41 @@ jobs:
             fi
           done
 
-          # 4. drivers/Kconfig içine SukiSU kaynağını bağla
+          # 4. drivers/Kconfig ve drivers/Makefile bağlantısı
           sed -i '/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/KernelSU\/Kconfig/d' drivers/Kconfig
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
 
-          # 5. drivers/Makefile içine ekle
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          # 6. Linux 4.14 Uyumluluk Yamaları
-          cat << 'EOF' > patch_compat.py
-          import os, glob, re
+          # 5. Çekirdek Seviyesi Genel Başlık Yamaları (Global Shims)
+          cat << 'EOF' > patch_core_headers.py
+          import os
 
-          def get_unique_files(pattern):
-              return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
-
-          # 6.1. GLOBAL: compiler.h fallthrough
+          # compiler.h fallthrough
           comp_h = "include/linux/compiler.h"
           if os.path.exists(comp_h):
-              with open(comp_h, "r") as f:
-                  ch_c = f.read()
-              if "fallthrough" not in ch_c:
+              with open(comp_h, "r") as f: c = f.read()
+              if "fallthrough" not in c:
                   with open(comp_h, "a") as f:
                       f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
-                  print("[OK] Global fallthrough makrosu eklendi.")
 
-          # 6.2. GLOBAL: task_work.h TWA_*
+          # task_work.h TWA_*
           tw_h = "include/linux/task_work.h"
           if os.path.exists(tw_h):
-              with open(tw_h, "r") as f:
-                  tw_c = f.read()
-              if "TWA_RESUME" not in tw_c:
-                  tw_patch = (
-                      "\n#ifndef TWA_RESUME\n"
-                      "#define TWA_NONE 0\n"
-                      "#define TWA_RESUME 1\n"
-                      "#define TWA_SIGNAL 2\n"
-                      "#endif\n"
-                  )
+              with open(tw_h, "r") as f: c = f.read()
+              if "TWA_RESUME" not in c:
                   with open(tw_h, "a") as f:
-                      f.write(tw_patch)
-                  print("[OK] Global task_work_add TWA_* makroları eklendi.")
+                      f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
 
-          # 6.3. GLOBAL: uaccess.h *_nofault tanımları
+          # uaccess.h *_nofault
           uacc_global = "include/linux/uaccess.h"
           if os.path.exists(uacc_global):
-              with open(uacc_global, "r") as f:
-                  ug_c = f.read()
-              if "copy_from_user_nofault" not in ug_c:
-                  nofault_defs = (
+              with open(uacc_global, "r") as f: c = f.read()
+              if "copy_from_user_nofault" not in c:
+                  defs = (
                       "\n#ifndef copy_from_user_nofault\n"
                       "#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n"
                       "#endif\n"
@@ -155,15 +139,12 @@ jobs:
                       "#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n"
                       "#endif\n"
                   )
-                  with open(uacc_global, "a") as f:
-                      f.write(nofault_defs)
-                  print("[OK] Global uaccess.h içine *_nofault makroları eklendi.")
+                  with open(uacc_global, "a") as f: f.write(defs)
 
-          # 6.4. arch/arm64/include/asm/uaccess.h içine access_ok 2/3 Parametre Overload Yaması
+          # asm/uaccess.h access_ok overload
           uaccess = "arch/arm64/include/asm/uaccess.h"
           if os.path.exists(uaccess):
-              with open(uaccess, "r") as f:
-                  lines = f.readlines()
+              with open(uaccess, "r") as f: lines = f.readlines()
               with open(uaccess, "w") as f:
                   for line in lines:
                       if "#define access_ok" in line and "__range_ok" in line:
@@ -173,47 +154,8 @@ jobs:
                           f.write("#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n")
                       else:
                           f.write(line)
-              print("[OK] asm/uaccess.h içine access_ok 2/3 parametre desteği eklendi.")
 
-          # 6.5. syscall_hook.h içine typedef enjeksiyonu
-          patch_header = (
-              "#ifndef _SUKISU_SYSCALL_FN_T_\n"
-              "#define _SUKISU_SYSCALL_FN_T_\n"
-              "#include <linux/compiler.h>\n"
-              "#include <linux/types.h>\n"
-              "struct pt_regs;\n"
-              "typedef long (*syscall_fn_t)(const struct pt_regs *);\n"
-              "#endif /* _SUKISU_SYSCALL_FN_T_ */\n\n"
-          )
-          for h_path in get_unique_files("**/hook/syscall_hook.h"):
-              with open(h_path, "r") as f:
-                  content = f.read()
-              if "_SUKISU_SYSCALL_FN_T_" not in content:
-                  with open(h_path, "w") as f:
-                      f.write(patch_header + content)
-
-          asm_syscall = "arch/arm64/include/asm/syscall.h"
-          if os.path.exists(asm_syscall):
-              with open(asm_syscall, "r") as f:
-                  ac = f.read()
-              if "_SUKISU_SYSCALL_FN_T_" not in ac:
-                  with open(asm_syscall, "w") as f:
-                      f.write(patch_header + ac)
-
-          # 6.6. init.c içine MODULE_IMPORT_NS
-          ns_patch = (
-              "#ifndef MODULE_IMPORT_NS\n"
-              "#define MODULE_IMPORT_NS(ns)\n"
-              "#endif\n\n"
-          )
-          for i_path in get_unique_files("**/core/init.c"):
-              with open(i_path, "r") as f:
-                  content = f.read()
-              if "MODULE_IMPORT_NS" not in content or "#define MODULE_IMPORT_NS" not in content:
-                  with open(i_path, "w") as f:
-                      f.write(ns_patch + content)
-
-          # 6.7. Başlık köprüleri (minmax.h ve vdso/datapage.h dahil)
+          # Sanal başlık köprüleri
           sh_map = {
               "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
               "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
@@ -224,441 +166,130 @@ jobs:
           for p, h in sh_map.items():
               os.makedirs(os.path.dirname(p), exist_ok=True)
               if not os.path.exists(p):
-                  with open(p, "w") as f:
-                      f.write(h)
-
-          # 6.8. sucompat.c ve util.h uyumluluğu
-          compat_header = (
-              "#include <linux/syscalls.h>\n"
-              "#include <linux/uaccess.h>\n"
-              "#ifndef strncpy_from_user_nofault\n"
-              "#define strncpy_from_user_nofault strncpy_from_user\n"
-              "#endif\n"
-              "#ifndef ksys_close\n"
-              "#define ksys_close sys_close\n"
-              "#endif\n\n"
-          )
-          for su_file in get_unique_files("**/feature/sucompat.c"):
-              with open(su_file, "r") as f:
-                  sc = f.read()
-              sc = sc.replace("strncpy_from_user_nofault", "strncpy_from_user")
-              sc = sc.replace("ksys_close", "sys_close")
-              with open(su_file, "w") as f:
-                  f.write(compat_header + sc)
-
-          for util_h in get_unique_files("**/include/util.h"):
-              with open(util_h, "r") as f:
-                  uc = f.read()
-              uc = uc.replace("ksys_close", "sys_close")
-              with open(util_h, "w") as f:
-                  f.write(compat_header + uc)
-
-          # 6.9. lsm_hook.c ve manager/pkg_observer.c stubları
-          lsm_stub = (
-              "#include <linux/types.h>\n"
-              "int ksu_lsm_hook_init(void) { return 0; }\n"
-              "void ksu_lsm_hook_exit(void) {}\n"
-          )
-          for lsm_f in get_unique_files("**/hook/lsm_hook.c"):
-              with open(lsm_f, "w") as f:
-                  f.write(lsm_stub)
-
-          pkg_stub = (
-              "#include <linux/types.h>\n"
-              "int ksu_pkg_observer_init(void) { return 0; }\n"
-              "void ksu_pkg_observer_exit(void) {}\n"
-          )
-          for pkg_f in get_unique_files("**/manager/pkg_observer.c"):
-              with open(pkg_f, "w") as f:
-                  f.write(pkg_stub)
-
-          # 6.10. patch_memory.c uyumluluğu
-          pm_patch_header = (
-              "#include <linux/uaccess.h>\n"
-              "#include <asm/cacheflush.h>\n"
-              "#include <asm/pgtable.h>\n"
-              "#ifndef __pte_to_phys\n"
-              "#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n"
-              "#endif\n"
-              "#ifndef copy_to_kernel_nofault\n"
-              "#define copy_to_kernel_nofault probe_kernel_write\n"
-              "#endif\n\n"
-          )
-          for pm_file in get_unique_files("**/hook/arm64/patch_memory.c"):
-              with open(pm_file, "r") as f:
-                  pm_code = f.read()
-              pm_code = pm_code.replace("__flush_icache_range", "flush_icache_range")
-              pm_code = pm_code.replace("copy_to_kernel_nofault", "probe_kernel_write")
-              with open(pm_file, "w") as f:
-                  f.write(pm_patch_header + pm_code)
-
-          # 6.11. file_wrapper.c Linux 4.14 VFS uyumluluk köprüsü
-          fw_header = (
-              "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n"
-              "#define _SUKISU_FILE_WRAPPER_4_14_\n"
-              "#include <linux/version.h>\n"
-              "#include <linux/types.h>\n"
-              "#include <linux/fs.h>\n"
-              "#include <linux/file.h>\n"
-              "#include <linux/dcache.h>\n"
-              "#include <linux/mount.h>\n"
-              "#include <linux/security.h>\n"
-              "#include <linux/err.h>\n\n"
-              "#ifndef __poll_t\n"
-              "typedef unsigned int __poll_t;\n"
-              "#define __poll_t __poll_t\n"
-              "#endif\n\n"
-              "#ifndef REMAP_FILE_DEDUP\n"
-              "#define REMAP_FILE_DEDUP 0\n"
-              "#endif\n\n"
-              "static inline int security_inode_init_security_anon(struct inode *inode,\n"
-              "                                                   const struct qstr *name,\n"
-              "                                                   const struct inode *context_inode)\n"
-              "{\n"
-              "    (void)inode;\n"
-              "    (void)name;\n"
-              "    (void)context_inode;\n"
-              "    return 0;\n"
-              "}\n\n"
-              "#ifndef selinux_inode\n"
-              "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
-              "#endif\n\n"
-              "#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0)\n"
-              "static inline struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,\n"
-              "                                             const char *name, int flags,\n"
-              "                                             const struct file_operations *fops)\n"
-              "{\n"
-              "    struct qstr this = QSTR_INIT(name, strlen(name));\n"
-              "    struct path path;\n"
-              "    struct file *file;\n"
-              "    path.dentry = d_alloc_pseudo(mnt->mnt_sb, &this);\n"
-              "    if (!path.dentry) {\n"
-              "        iput(inode);\n"
-              "        return ERR_PTR(-ENOMEM);\n"
-              "    }\n"
-              "    path.mnt = mntget(mnt);\n"
-              "    d_instantiate(path.dentry, inode);\n"
-              "    file = alloc_file(&path, (fmode_t)flags, fops);\n"
-              "    if (IS_ERR(file)) {\n"
-              "        ihold(inode);\n"
-              "        path_put(&path);\n"
-              "    }\n"
-              "    return file;\n"
-              "}\n"
-              "#endif\n"
-              "#endif /* _SUKISU_FILE_WRAPPER_4_14_ */\n\n"
-          )
-          for fw_file in get_unique_files("**/infra/file_wrapper.c"):
-              with open(fw_file, "r") as f:
-                  content = f.read()
-              if "_SUKISU_FILE_WRAPPER_4_14_" not in content:
-                  lines = content.splitlines(True)
-                  new_lines = []
-                  skip_func = False
-                  for line in lines:
-                      if any(op in line for op in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]):
-                          new_lines.append("// [4.14 backport] " + line)
-                      elif any(fn in line for fn in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]):
-                          new_lines.append("// [4.14 backport] modern fops omitted\n")
-                          skip_func = True
-                      elif skip_func:
-                          if line.startswith("}"):
-                              skip_func = False
-                      else:
-                          new_lines.append(line)
-                  with open(fw_file, "w") as f:
-                      f.write(fw_header + "".join(new_lines))
-
-          # 6.12. event_queue ve poll uyumluluğu
-          poll_h = "include/linux/poll.h"
-          if os.path.exists(poll_h):
-              with open(poll_h, "r") as f:
-                  ph_c = f.read()
-              if "__poll_t" not in ph_c:
-                  ph_patch = (
-                      "\n#include <uapi/linux/eventpoll.h>\n"
-                      "#ifndef __poll_t\n"
-                      "typedef unsigned int __poll_t;\n"
-                      "#define __poll_t __poll_t\n"
-                      "#endif\n"
-                  )
-                  with open(poll_h, "a") as f:
-                      f.write(ph_patch)
-
-          eq_header = (
-              "#ifndef _SUKISU_EVENT_QUEUE_4_14_\n"
-              "#define _SUKISU_EVENT_QUEUE_4_14_\n"
-              "#include <linux/poll.h>\n"
-              "#include <uapi/linux/eventpoll.h>\n"
-              "#ifndef __poll_t\n"
-              "typedef unsigned int __poll_t;\n"
-              "#define __poll_t __poll_t\n"
-              "#endif\n"
-              "#ifndef EPOLLIN\n"
-              "#define EPOLLIN 0x00000001\n"
-              "#endif\n"
-              "#ifndef EPOLLHUP\n"
-              "#define EPOLLHUP 0x00000010\n"
-              "#endif\n"
-              "#ifndef EPOLLRDNORM\n"
-              "#define EPOLLRDNORM 0x00000040\n"
-              "#endif\n"
-              "#endif /* _SUKISU_EVENT_QUEUE_4_14_ */\n\n"
-          )
-          for eq_file in get_unique_files("**/infra/event_queue.*"):
-              with open(eq_file, "r") as f:
-                  content = f.read()
-              if "_SUKISU_EVENT_QUEUE_4_14_" not in content:
-                  with open(eq_file, "w") as f:
-                      f.write(eq_header + content)
-
-          # 6.13. seccomp_cache.c ve asm/seccomp.h uyumluluğu
-          sc_header = (
-              "#ifndef _SUKISU_SECCOMP_CACHE_4_14_\n"
-              "#define _SUKISU_SECCOMP_CACHE_4_14_\n"
-              "#include <asm/unistd.h>\n"
-              "#ifndef SECCOMP_ARCH_NATIVE_NR\n"
-              "#ifdef __NR_syscalls\n"
-              "#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n"
-              "#else\n"
-              "#define SECCOMP_ARCH_NATIVE_NR 512\n"
-              "#endif\n"
-              "#endif\n"
-              "#ifndef SECCOMP_ARCH_COMPAT_NR\n"
-              "#ifdef __NR_compat_syscalls\n"
-              "#define SECCOMP_ARCH_COMPAT_NR __NR_compat_syscalls\n"
-              "#else\n"
-              "#define SECCOMP_ARCH_COMPAT_NR 400\n"
-              "#endif\n"
-              "#endif\n"
-              "#endif /* _SUKISU_SECCOMP_CACHE_4_14_ */\n\n"
-          )
-          for sc_file in get_unique_files("**/infra/seccomp_cache.*"):
-              with open(sc_file, "r") as f:
-                  content = f.read()
-              if "_SUKISU_SECCOMP_CACHE_4_14_" not in content:
-                  with open(sc_file, "w") as f:
-                      f.write(sc_header + content)
-
-          asm_seccomp = "arch/arm64/include/asm/seccomp.h"
-          if os.path.exists(asm_seccomp):
-              with open(asm_seccomp, "r") as f:
-                  asc = f.read()
-              if "_SUKISU_SECCOMP_CACHE_4_14_" not in asc:
-                  with open(asm_seccomp, "a") as f:
-                      f.write("\n" + sc_header)
-
-          # 6.14. su_mount_ns.c uyumluluğu
-          for mnt_file in get_unique_files("**/infra/su_mount_ns.c"):
-              with open(mnt_file, "r") as f:
-                  mc = f.read()
-              mc = mc.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>\n#include <linux/syscalls.h>")
-              mc = mc.replace("ksys_unshare", "sys_unshare")
-              prefix_unshare = (
-                  "#include <linux/syscalls.h>\n"
-                  "#ifndef ksys_unshare\n"
-                  "#define ksys_unshare sys_unshare\n"
-                  "#endif\n\n"
-              )
-              with open(mnt_file, "w") as f:
-                  f.write(prefix_unshare + mc)
-
-          # 6.15. policy/allowlist.c ve put_task_struct uyumluluğu
-          allowlist_header = (
-              "#include <linux/sched/task.h>\n"
-              "#include <linux/task_work.h>\n"
-              "#include <linux/compiler.h>\n"
-              "#ifndef TWA_RESUME\n"
-              "#define TWA_RESUME 1\n"
-              "#endif\n"
-              "#ifndef fallthrough\n"
-              "#define fallthrough do {} while (0)\n"
-              "#endif\n\n"
-          )
-          for pol_f in get_unique_files("drivers/kernelsu/policy/*.c") | get_unique_files("KernelSU/kernel/policy/*.c"):
-              with open(pol_f, "r") as f:
-                  pol_c = f.read()
-              with open(pol_f, "w") as f:
-                  f.write(allowlist_header + pol_c)
-
-          all_c_files = get_unique_files("drivers/kernelsu/**/*.c") | get_unique_files("KernelSU/**/*.c")
-          for cf in all_c_files:
-              with open(cf, "r") as f:
-                  fc = f.read()
-              if "put_task_struct" in fc and "<linux/sched/task.h>" not in fc:
-                  with open(cf, "w") as f:
-                      f.write("#include <linux/sched/task.h>\n" + fc)
-
-          # 6.16. filter_count temizliği (4.14 seccomp uyumluluğu)
-          for ap_file in all_c_files:
-              with open(ap_file, "r") as f:
-                  ap_lines = f.readlines()
-              modified = False
-              clean_lines = []
-              for line in ap_lines:
-                  if "filter_count" in line:
-                      clean_lines.append("// [4.14 seccomp] " + line)
-                      modified = True
-                  else:
-                      clean_lines.append(line)
-              if modified:
-                  with open(ap_file, "w") as f:
-                      f.write("".join(clean_lines))
-
-          # 6.17. *_nofault dönüşümü, minmax.h köprüsü ve uaccess.h enjeksiyonu
-          for cf in all_c_files:
-              with open(cf, "r") as f:
-                  code = f.read()
-              code = code.replace("copy_from_user_nofault", "copy_from_user")
-              code = code.replace("copy_to_user_nofault", "copy_to_user")
-              code = code.replace("strncpy_from_user_nofault", "strncpy_from_user")
-              code = code.replace("<linux/minmax.h>", "<linux/kernel.h>")
-              if any(k in code for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in code:
-                  code = "#include <linux/uaccess.h>\n" + code
-              with open(cf, "w") as f:
-                  f.write(code)
-
-          # 6.18. SELinux: selinux.c için köprüler
-          ksu_selinux_header = (
-              "#include <linux/security.h>\n"
-              "struct task_security_struct;\n"
-              "struct inode_security_struct;\n"
-              "struct file_security_struct;\n"
-              "#ifndef selinux_cred\n"
-              "#define selinux_cred(cred) ((struct task_security_struct *)(cred)->security)\n"
-              "#endif\n"
-              "#ifndef selinux_inode\n"
-              "#define selinux_inode(inode) ((struct inode_security_struct *)(inode)->i_security)\n"
-              "#endif\n"
-              "#ifndef selinux_file\n"
-              "#define selinux_file(file) ((struct file_security_struct *)(file)->f_security)\n"
-              "#endif\n\n"
-          )
-          for sf in get_unique_files("**/selinux/selinux.c") | get_unique_files("**/selinux/selinux.h"):
-              with open(sf, "r") as f:
-                  sc = f.read()
-              if "selinux_cred" in sc or "selinux_inode" in sc or "selinux_file" in sc:
-                  with open(sf, "w") as f:
-                      f.write(ksu_selinux_header + sc)
-
-          # 6.19. SELinux: rules.c ve sepolicy.c stubları
-          rules_stub = (
-              '#include <linux/types.h>\n'
-              'int ksu_load_rules(void) {\n'
-              '    return 0;\n'
-              '}\n'
-          )
-          for rf in get_unique_files("**/selinux/rules.c"):
-              with open(rf, "w") as f:
-                  f.write(rules_stub)
-
-          sepol_stub = (
-              '#include <linux/types.h>\n'
-              'struct selinux_policy;\n'
-              'struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol) {\n'
-              '    return (void *)0;\n'
-              '}\n'
-          )
-          for spf in get_unique_files("**/selinux/sepolicy.c"):
-              with open(spf, "w") as f:
-                  f.write(sepol_stub)
-
-          # 6.20. supercall/dispatch.c ve tüm ağaçta tasklist_lock & init_task köprüleri
-          sched_bridge = (
-              "#include <linux/sched.h>\n"
-              "#include <linux/sched/task.h>\n"
-              "#include <linux/sched/signal.h>\n"
-              "#include <linux/init_task.h>\n"
-              "extern rwlock_t tasklist_lock;\n"
-              "extern struct task_struct init_task;\n\n"
-          )
-          for cf in all_c_files:
-              with open(cf, "r") as f:
-                  code = f.read()
-              if "tasklist_lock" in code or "init_task" in code:
-                  if "extern rwlock_t tasklist_lock" not in code:
-                      with open(cf, "w") as f:
-                          f.write(sched_bridge + code)
-
-          # 6.21. feature/selinux_hide.c Linux 4.14 stublanması
-          sh_stubs = [
-              "int ksu_selinux_hide_init(void) { return 0; }",
-              "void ksu_selinux_hide_exit(void) {}",
-              "bool ksu_is_selinux_hide_enabled(void) { return false; }",
-              "int ksu_set_selinux_hide(bool enable) { return 0; }",
-              "int ksu_get_selinux_hide(void) { return 0; }"
-          ]
-          extra_funcs_sh = set()
-          for h_or_c in get_unique_files("**/selinux_hide.*"):
-              with open(h_or_c, "r") as f:
-                  code_text = f.read()
-              for m in re.finditer(r'^(?:extern\s+)?([a-zA-Z_][a-zA-Z0-9_*\s]*?)\s+(ksu_[a-zA-Z0-9_]+)\s*\(([^)]*)\)', code_text, re.MULTILINE):
-                  ret_t = m.group(1).strip()
-                  fn_name = m.group(2).strip()
-                  fn_args = m.group(3).strip()
-                  if 'static' in ret_t or fn_name in [s.split('(')[0].split()[-1] for s in sh_stubs]:
-                      continue
-                  if ret_t == 'void':
-                      r_val = ''
-                  elif '*' in ret_t:
-                      r_val = 'return (void *)0;'
-                  elif ret_t in ['bool', '_Bool']:
-                      r_val = 'return false;'
-                  else:
-                      r_val = 'return 0;'
-                  extra_funcs_sh.add(f"{ret_t} {fn_name}({fn_args}) {{ {r_val} }}")
-
-          stub_content_sh = (
-              "#include <linux/types.h>\n"
-              "#include <linux/stddef.h>\n"
-              "struct selinux_policy;\n"
-              "struct selinux_state;\n\n" +
-              "\n".join(sh_stubs + list(extra_funcs_sh)) + "\n"
-          )
-          for sh_c in get_unique_files("**/feature/selinux_hide.c"):
-              with open(sh_c, "w") as f:
-                  f.write(stub_content_sh)
-              print(f"[OK] selinux_hide.c stublandı: {sh_c}")
-
-          # 6.22. feature/cpu_spoof.c Linux 4.14 stublanması
-          cs_stubs = [
-              "int ksu_cpu_spoof_init(void) { return 0; }",
-              "void ksu_cpu_spoof_exit(void) {}",
-              "bool ksu_is_cpu_spoof_enabled(void) { return false; }",
-              "int ksu_set_cpu_spoof(bool enable) { return 0; }",
-              "int ksu_get_cpu_spoof(void) { return 0; }"
-          ]
-          extra_funcs_cs = set()
-          for h_or_c in get_unique_files("**/cpu_spoof.*"):
-              with open(h_or_c, "r") as f:
-                  code_text = f.read()
-              for m in re.finditer(r'^(?:extern\s+)?([a-zA-Z_][a-zA-Z0-9_*\s]*?)\s+(ksu_[a-zA-Z0-9_]+)\s*\(([^)]*)\)', code_text, re.MULTILINE):
-                  ret_t = m.group(1).strip()
-                  fn_name = m.group(2).strip()
-                  fn_args = m.group(3).strip()
-                  if 'static' in ret_t or fn_name in [s.split('(')[0].split()[-1] for s in cs_stubs]:
-                      continue
-                  if ret_t == 'void':
-                      r_val = ''
-                  elif '*' in ret_t:
-                      r_val = 'return (void *)0;'
-                  elif ret_t in ['bool', '_Bool']:
-                      r_val = 'return false;'
-                  else:
-                      r_val = 'return 0;'
-                  extra_funcs_cs.add(f"{ret_t} {fn_name}({fn_args}) {{ {r_val} }}")
-
-          stub_content_cs = (
-              "#include <linux/types.h>\n"
-              "#include <linux/stddef.h>\n\n" +
-              "\n".join(cs_stubs + list(extra_funcs_cs)) + "\n"
-          )
-          for cs_c in get_unique_files("**/feature/cpu_spoof.c"):
-              with open(cs_c, "w") as f:
-                  f.write(stub_content_cs)
-              print(f"[OK] cpu_spoof.c stublandı: {cs_c}")
+                  with open(p, "w") as f: f.write(h)
           EOF
-          python3 patch_compat.py
+          python3 patch_core_headers.py
+
+      - name: Apply SukiSU 4.14 Compatibility Shims
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+          cat << 'EOF' > patch_sukisu_compat.py
+          import os, glob, re
+
+          def get_files(pattern):
+              return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
+
+          # 1. syscall_fn_t ve MODULE_IMPORT_NS
+          fn_t = (
+              "#ifndef _SUKISU_SYSCALL_FN_T_\n#define _SUKISU_SYSCALL_FN_T_\n"
+              "#include <linux/compiler.h>\n#include <linux/types.h>\nstruct pt_regs;\n"
+              "typedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif\n\n"
+          )
+          for h in get_files("**/hook/syscall_hook.h") | get_files("arch/arm64/include/asm/syscall.h"):
+              with open(h, "r") as f: c = f.read()
+              if "_SUKISU_SYSCALL_FN_T_" not in c:
+                  with open(h, "w") as f: f.write(fn_t + c)
+
+          for ic in get_files("**/core/init.c"):
+              with open(ic, "r") as f: c = f.read()
+              if "MODULE_IMPORT_NS" not in c or "#define MODULE_IMPORT_NS" not in c:
+                  with open(ic, "w") as f: f.write("#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n\n" + c)
+
+          # 2. sucompat.c & util.h
+          su_compat = "#include <linux/syscalls.h>\n#include <linux/uaccess.h>\n#ifndef strncpy_from_user_nofault\n#define strncpy_from_user_nofault strncpy_from_user\n#endif\n#ifndef ksys_close\n#define ksys_close sys_close\n#endif\n\n"
+          for sf in get_files("**/feature/sucompat.c") | get_files("**/include/util.h"):
+              with open(sf, "r") as f: c = f.read()
+              c = c.replace("strncpy_from_user_nofault", "strncpy_from_user").replace("ksys_close", "sys_close")
+              with open(sf, "w") as f: f.write(su_compat + c)
+
+          # 3. patch_memory.c
+          pm_h = "#include <linux/uaccess.h>\n#include <asm/cacheflush.h>\n#include <asm/pgtable.h>\n#ifndef __pte_to_phys\n#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n#endif\n#ifndef copy_to_kernel_nofault\n#define copy_to_kernel_nofault probe_kernel_write\n#endif\n\n"
+          for pm in get_files("**/hook/arm64/patch_memory.c"):
+              with open(pm, "r") as f: c = f.read()
+              c = c.replace("__flush_icache_range", "flush_icache_range").replace("copy_to_kernel_nofault", "probe_kernel_write")
+              with open(pm, "w") as f: f.write(pm_h + c)
+
+          # 4. file_wrapper.c (4.14 VFS bridge)
+          fw_h = (
+              "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n#define _SUKISU_FILE_WRAPPER_4_14_\n"
+              "#include <linux/version.h>\n#include <linux/fs.h>\n#include <linux/file.h>\n"
+              "#include <linux/dcache.h>\n#include <linux/mount.h>\n#include <linux/security.h>\n#include <linux/err.h>\n"
+              "typedef unsigned int __poll_t;\n#define REMAP_FILE_DEDUP 0\n"
+              "static inline int security_inode_init_security_anon(struct inode *i, const struct qstr *n, const struct inode *c) { return 0; }\n"
+              "#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n"
+              "static inline struct file *alloc_file_pseudo(struct inode *i, struct vfsmount *m, const char *n, int f, const struct file_operations *fops) {\n"
+              "    struct qstr s = QSTR_INIT(n, strlen(n)); struct path p = { .dentry = d_alloc_pseudo(m->mnt_sb, &s), .mnt = mntget(m) };\n"
+              "    if (!p.dentry) { iput(i); return ERR_PTR(-ENOMEM); }\n"
+              "    d_instantiate(p.dentry, i); return alloc_file(&p, (fmode_t)f, fops);\n"
+              "}\n#endif\n\n"
+          )
+          for fw in get_files("**/infra/file_wrapper.c"):
+              with open(fw, "r") as f: lines = f.readlines()
+              out, skip = [], False
+              for l in lines:
+                  if any(x in l for x in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]): out.append("// " + l)
+                  elif any(x in l for x in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]): skip = True
+                  elif skip:
+                      if l.startswith("}"): skip = False
+                  else: out.append(l)
+              with open(fw, "w") as f: f.write(fw_h + "".join(out))
+
+          # 5. event_queue & seccomp_cache & su_mount_ns
+          for eq in get_files("**/infra/event_queue.*"):
+              with open(eq, "r") as f: c = f.read()
+              if "__poll_t" not in c:
+                  with open(eq, "w") as f: f.write("#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\ntypedef unsigned int __poll_t;\n#define EPOLLIN 1\n#define EPOLLHUP 0x10\n#define EPOLLRDNORM 0x40\n" + c)
+
+          for sc in get_files("**/infra/seccomp_cache.*"):
+              with open(sc, "r") as f: c = f.read()
+              if "SECCOMP_ARCH_NATIVE_NR" not in c:
+                  with open(sc, "w") as f: f.write("#include <asm/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#endif\n" + c)
+
+          for mn in get_files("**/infra/su_mount_ns.c"):
+              with open(mn, "r") as f: c = f.read()
+              c = c.replace("<uapi/linux/mount.h>", "<linux/mount.h>\n#include <uapi/linux/fs.h>\n#include <linux/syscalls.h>").replace("ksys_unshare", "sys_unshare")
+              with open(mn, "w") as f: f.write("#include <linux/syscalls.h>\n#ifndef ksys_unshare\n#define ksys_unshare sys_unshare\n#endif\n" + c)
+
+          # 6. Tüm C dosyalarında ortak temizlik (*_nofault, filter_count, uaccess, sched)
+          all_c = get_files("drivers/kernelsu/**/*.c") | get_files("KernelSU/**/*.c")
+          sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
+          for cf in all_c:
+              with open(cf, "r") as f: c = f.read()
+              c = c.replace("copy_from_user_nofault", "copy_from_user").replace("copy_to_user_nofault", "copy_to_user").replace("strncpy_from_user_nofault", "strncpy_from_user")
+              c = c.replace("<linux/minmax.h>", "<linux/kernel.h>")
+              c = re.sub(r'.*filter_count.*', '// [4.14 seccomp]', c)
+              if any(k in c for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in c:
+                  c = "#include <linux/uaccess.h>\n" + c
+              if "put_task_struct" in c and "<linux/sched/task.h>" not in c:
+                  c = "#include <linux/sched/task.h>\n" + c
+              if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
+                  c = sched_b + c
+              with open(cf, "w") as f: f.write(c)
+
+          # 7. SELinux: selinux.c köprüsü
+          sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
+          for sf in get_files("**/selinux/selinux.c"):
+              with open(sf, "r") as f: c = f.read()
+              with open(sf, "w") as f: f.write(sel_head + c)
+
+          # 8. 4.14 Uyumsuz Modül Stubları (GKI modüllerinin güvenli kabukları)
+          stub_dict = {
+              "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
+              "**/manager/pkg_observer.c": "int ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n",
+              "**/selinux/rules.c": "int ksu_load_rules(void){return 0;}\n",
+              "**/selinux/sepolicy.c": "struct selinux_policy;\nstruct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *o){return (void*)0;}\n",
+              "**/feature/selinux_hide.c": "int ksu_selinux_hide_init(void){return 0;}\nvoid ksu_selinux_hide_exit(void){}\nbool ksu_is_selinux_hide_enabled(void){return false;}\nint ksu_set_selinux_hide(bool e){return 0;}\nint ksu_get_selinux_hide(void){return 0;}\n",
+              "**/feature/cpu_spoof.c": "int ksu_cpu_spoof_init(void){return 0;}\nvoid ksu_cpu_spoof_exit(void){}\nbool ksu_is_cpu_spoof_enabled(void){return false;}\nint ksu_set_cpu_spoof(bool e){return 0;}\nint ksu_get_cpu_spoof(void){return 0;}\n"
+          }
+          for pat, code in stub_dict.items():
+              for target in get_files(pat):
+                  with open(target, "w") as f: f.write("#include <linux/types.h>\n#include <linux/stddef.h>\n" + code)
+                  print(f"[OK] Stub uygulandı: {target}")
+          EOF
+          python3 patch_sukisu_compat.py
 
       - name: Setup Configuration
         shell: bash
