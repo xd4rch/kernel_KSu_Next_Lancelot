@@ -256,15 +256,14 @@ jobs:
                   c = sched_b + c
               with open(cf, "w") as f: f.write(c)
 
-          # 7. policy/app_profile.c içine seccomp_filter_release tanımı (regex yerine doğrudan fonksiyon gövdesi)
+          # 7. policy/app_profile.c içine seccomp_filter_release gövdesi (69. satırdaki prototiple birebir eşleşen imza)
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
-              "struct seccomp_filter;\n"
-              "void seccomp_filter_release(struct seccomp_filter *orig) {}\n"
+              "void seccomp_filter_release(struct task_struct *tsk) {}\n"
           )
           for ap in get_files("**/policy/app_profile.c"):
               with open(ap, "r") as f: c = f.read()
-              if "void seccomp_filter_release(struct seccomp_filter *orig) {}" not in c:
+              if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
                   print(f"[OK] seccomp_filter_release gövdesi eklendi: {ap}")
 
@@ -336,6 +335,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
 
+          # Ham Image derlemesi
           make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
