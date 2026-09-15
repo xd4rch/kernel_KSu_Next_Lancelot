@@ -256,7 +256,7 @@ jobs:
                   c = sched_b + c
               with open(cf, "w") as f: f.write(c)
 
-          # 7. policy/app_profile.c içine seccomp_filter_release tanımı
+          # 7. policy/app_profile.c içine seccomp_filter_release gövdesi
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
               "void seccomp_filter_release(struct task_struct *tsk) {}\n"
@@ -267,19 +267,18 @@ jobs:
                   with open(ap, "a") as f: f.write(seccomp_stub)
                   print(f"[OK] seccomp_filter_release gövdesi eklendi: {ap}")
 
-          # 8. feature/kernel_umount.c içine path_umount köprüsü
+          # 8. feature/kernel_umount.c içine path_umount gövdesi (koşulsuz imza kontrolüyle)
           path_umount_stub = (
-              "\n/* [4.14 backport] path_umount does not exist in Linux 4.14 */\n"
-              "struct path;\n"
+              "\n/* [4.14 backport path_umount] */\n"
               "int path_umount(struct path *path, int flags) {\n"
               "    return 0;\n"
               "}\n"
           )
           for ku in get_files("**/feature/kernel_umount.c"):
               with open(ku, "r") as f: c = f.read()
-              if "int path_umount(" not in c:
+              if "/* [4.14 backport path_umount] */" not in c:
                   with open(ku, "a") as f: f.write(path_umount_stub)
-                  print(f"[OK] path_umount gövdesi eklendi: {ku}")
+                  print(f"[OK] path_umount gövdesi başarıyla eklendi: {ku}")
 
           # 9. SELinux: selinux.c köprüsü
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
