@@ -265,9 +265,8 @@ jobs:
               with open(ap, "r") as f: c = f.read()
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
-                  print(f"[OK] seccomp_filter_release gövdesi eklendi: {ap}")
 
-          # 8. feature/kernel_umount.c içine path_umount gövdesi (koşulsuz imza kontrolüyle)
+          # 8. feature/kernel_umount.c içine path_umount gövdesi
           path_umount_stub = (
               "\n/* [4.14 backport path_umount] */\n"
               "int path_umount(struct path *path, int flags) {\n"
@@ -278,15 +277,46 @@ jobs:
               with open(ku, "r") as f: c = f.read()
               if "/* [4.14 backport path_umount] */" not in c:
                   with open(ku, "a") as f: f.write(path_umount_stub)
-                  print(f"[OK] path_umount gövdesi başarıyla eklendi: {ku}")
 
-          # 9. SELinux: selinux.c köprüsü
+          # 9. KRİTİK: syscall_hook 4.14 ARM64 ABI Köprüsü (Crash Fix)
+          # 4.14'te x0=fd, x1=buf olarak gelir. Bu köprü ile regs'i task_pt_regs(current)'tan alıyoruz
+          # ve orig çağrılarını 4.14 kernel ABI'sine uygun 6 parametreye açıyoruz.
+          for sh_file in get_files("**/hook/syscall_hook.c") | get_files("**/hook/syscall_event_bridge.c"):
+              with open(sh_file, "r") as f: sc = f.read()
+              if "/* [4.14 syscall ABI bridge] */" not in sc:
+                  bridge_head = (
+                      "\n/* [4.14 syscall ABI bridge] */\n"
+                      "#include <linux/sched/task_stack.h>\n"
+                      "#include <asm/ptrace.h>\n"
+                  )
+                  # orig_sys_* çağrılarını çözen makrolar
+                  orig_funcs = set(re.findall(r'(?:orig_sys_[a-zA-Z0-9_]+)', sc))
+                  for ofn in orig_funcs:
+                      bridge_head += (
+                          f"#define {ofn}(r) (((long (*)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long))({ofn}))"
+                          f"((r)->regs[0], (r)->regs[1], (r)->regs[2], (r)->regs[3], (r)->regs[4], (r)->regs[5]))\n"
+                      )
+                  # ksu_sys_* fonksiyonlarının x0 dereference hatasını önleyen gövde enjeksiyonu
+                  def fix_hook_fn(m):
+                      fn_name = m.group(1)
+                      return (
+                          f"asmlinkage long {fn_name}(unsigned long _a0, unsigned long _a1, unsigned long _a2, unsigned long _a3, unsigned long _a4, unsigned long _a5)\n"
+                          f"{{\n"
+                          f"    struct pt_regs *regs = task_pt_regs(current);\n"
+                          f"    (void)_a0; (void)_a1; (void)_a2; (void)_a3; (void)_a4; (void)_a5;\n"
+                      )
+                  sc = re.sub(r'asmlinkage\s+long\s+(ksu_sys_[a-zA-Z0-9_]+)\s*\([^)]*regs[^)]*\)\s*\{', fix_hook_fn, sc)
+                  with open(sh_file, "w") as f:
+                      f.write(bridge_head + sc)
+                  print(f"[OK] 4.14 Syscall ABI Köprüsü uygulandı: {sh_file}")
+
+          # 10. SELinux: selinux.c köprüsü
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
           for sf in get_files("**/selinux/selinux.c"):
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # 10. 4.14 Uyumsuz Modül Stubları
+          # 11. 4.14 Uyumsuz Modül Stubları
           stub_dict = {
               "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "**/manager/pkg_observer.c": "int ksu_observer_init(void){return 0;}\nvoid ksu_observer_exit(void){}\nint ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n",
@@ -299,7 +329,6 @@ jobs:
           for pat, code in stub_dict.items():
               for target in get_files(pat):
                   with open(target, "w") as f: f.write("#include <linux/types.h>\n#include <linux/stddef.h>\n" + code)
-                  print(f"[OK] Stub uygulandı: {target}")
           EOF
           python3 patch_sukisu_compat.py
 
@@ -355,7 +384,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-typedef-redefinition" \
+            KCFLAGS="-Wno-typedef-redefinition -Wno-cast-function-type" \
             Image
 
       - name: Patch SukiSU Ultra KPM
