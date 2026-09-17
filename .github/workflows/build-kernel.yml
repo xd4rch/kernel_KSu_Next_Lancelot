@@ -65,9 +65,10 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          # 4.14 VFS seviyesi manuel kancalama (fs/exec.c, fs/open.c vb.)
           if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
-            git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
+            git apply --whitespace=nowarn "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || {
+              patch -p1 < "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
+            }
             echo "[OK] KSU_HOOKS_PATCH.patch çekirdeğe başarıyla uygulandı."
           fi
 
@@ -102,7 +103,6 @@ jobs:
           cat << 'EOF' > patch_core_headers.py
           import os
 
-          # compiler.h fallthrough
           comp_h = "include/linux/compiler.h"
           if os.path.exists(comp_h):
               with open(comp_h, "r") as f: c = f.read()
@@ -110,7 +110,6 @@ jobs:
                   with open(comp_h, "a") as f:
                       f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
 
-          # task_work.h TWA_*
           tw_h = "include/linux/task_work.h"
           if os.path.exists(tw_h):
               with open(tw_h, "r") as f: c = f.read()
@@ -118,7 +117,6 @@ jobs:
                   with open(tw_h, "a") as f:
                       f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
 
-          # uaccess.h *_nofault
           uacc_global = "include/linux/uaccess.h"
           if os.path.exists(uacc_global):
               with open(uacc_global, "r") as f: c = f.read()
@@ -136,7 +134,6 @@ jobs:
                   )
                   with open(uacc_global, "a") as f: f.write(defs)
 
-          # asm/uaccess.h access_ok overload
           uaccess = "arch/arm64/include/asm/uaccess.h"
           if os.path.exists(uaccess):
               with open(uaccess, "r") as f: lines = f.readlines()
@@ -150,7 +147,6 @@ jobs:
                       else:
                           f.write(line)
 
-          # Sanal başlık köprüleri
           sh_map = {
               "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
               "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
@@ -177,7 +173,6 @@ jobs:
           def get_files(pattern):
               return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
-          # 1. syscall_fn_t ve MODULE_IMPORT_NS
           fn_t = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n#define _SUKISU_SYSCALL_FN_T_\n"
               "#include <linux/compiler.h>\n#include <linux/types.h>\nstruct pt_regs;\n"
@@ -193,21 +188,18 @@ jobs:
               if "MODULE_IMPORT_NS" not in c or "#define MODULE_IMPORT_NS" not in c:
                   with open(ic, "w") as f: f.write("#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n\n" + c)
 
-          # 2. sucompat.c & util.h
           su_compat = "#include <linux/syscalls.h>\n#include <linux/uaccess.h>\n#ifndef strncpy_from_user_nofault\n#define strncpy_from_user_nofault strncpy_from_user\n#endif\n#ifndef ksys_close\n#define ksys_close sys_close\n#endif\n\n"
           for sf in get_files("**/feature/sucompat.c") | get_files("**/include/util.h"):
               with open(sf, "r") as f: c = f.read()
               c = c.replace("strncpy_from_user_nofault", "strncpy_from_user").replace("ksys_close", "sys_close")
               with open(sf, "w") as f: f.write(su_compat + c)
 
-          # 3. patch_memory.c
           pm_h = "#include <linux/uaccess.h>\n#include <asm/cacheflush.h>\n#include <asm/pgtable.h>\n#ifndef __pte_to_phys\n#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n#endif\n#ifndef copy_to_kernel_nofault\n#define copy_to_kernel_nofault probe_kernel_write\n#endif\n\n"
           for pm in get_files("**/hook/arm64/patch_memory.c"):
               with open(pm, "r") as f: c = f.read()
               c = c.replace("__flush_icache_range", "flush_icache_range").replace("copy_to_kernel_nofault", "probe_kernel_write")
               with open(pm, "w") as f: f.write(pm_h + c)
 
-          # 4. file_wrapper.c (4.14 VFS bridge)
           fw_h = (
               "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n#define _SUKISU_FILE_WRAPPER_4_14_\n"
               "#include <linux/version.h>\n#include <linux/fs.h>\n#include <linux/file.h>\n"
@@ -232,7 +224,6 @@ jobs:
                   else: out.append(l)
               with open(fw, "w") as f: f.write(fw_h + "".join(out))
 
-          # 5. event_queue.h ve event_queue.c izole __poll_t köprüsü
           eq_head = (
               "#ifndef _SUKISU_EQ_FIX_\n#define _SUKISU_EQ_FIX_\n"
               "#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\n"
@@ -252,7 +243,6 @@ jobs:
               if "SECCOMP_ARCH_NATIVE_NR" not in c:
                   with open(sc, "w") as f: f.write("#include <asm/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#endif\n" + c)
 
-          # 6. Ortak temizlikler (*_nofault, filter_count, uaccess, sched)
           all_c = get_files("drivers/kernelsu/**/*.c") | get_files("KernelSU/**/*.c")
           sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
           for cf in all_c:
@@ -268,7 +258,6 @@ jobs:
                   c = sched_b + c
               with open(cf, "w") as f: f.write(c)
 
-          # 7. policy/app_profile.c içine seccomp_filter_release gövdesi
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
               "void seccomp_filter_release(struct task_struct *tsk) {}\n"
@@ -278,7 +267,6 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 8. feature/kernel_umount.c içine path_umount gövdesi
           path_umount_stub = (
               "\n/* [4.14 backport path_umount] */\n"
               "int path_umount(struct path *path, int flags) {\n"
@@ -290,25 +278,26 @@ jobs:
               if "/* [4.14 backport path_umount] */" not in c:
                   with open(ku, "a") as f: f.write(path_umount_stub)
 
-          # 9. KRİTİK: 4.14 Manuel Hook Köprüsü (KSU_HOOKS_PATCH bağlayıcı köprüsü)
+          # 4.14 Manuel Hook Köprüsü (Düzeltilmiş Doğrudan Çağrı)
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
-              "#include <linux/types.h>\n"
-              "struct filename;\n"
-              "extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\n"
+              "#include <linux/binfmts.h>\n\n"
               "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
-              "    return ksu_handle_execveat_ksud(fd, filename_ptr, argv, envp, flags);\n"
-              "}\n"
+              "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
+              "        ksu_handle_execveat_ksud((*filename_ptr)->name, (struct user_arg_ptr *)argv);\n"
+              "    }\n"
+              "    return 0;\n"
+              "}\n\n"
               "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
               "    return 0;\n"
-              "}\n"
+              "}\n\n"
               "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
               "    return 0;\n"
-              "}\n"
+              "}\n\n"
               "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) {\n"
               "    return 0;\n"
-              "}\n"
+              "}\n\n"
               "int ksu_handle_devpts(struct inode *inode) {\n"
               "    return 0;\n"
               "}\n"
@@ -317,15 +306,13 @@ jobs:
               with open(ksud_f, "r") as f: c = f.read()
               if "ksu_handle_execveat(" not in c:
                   with open(ksud_f, "a") as f: f.write(manual_hook_bridge)
-                  print(f"[OK] 4.14 Manuel Hook Köprüsü eklendi: {ksud_f}")
+                  print(f"[OK] 4.14 Manuel Hook Köprüsü başarıyla eklendi: {ksud_f}")
 
-          # 10. SELinux: selinux.c köprüsü
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
           for sf in get_files("**/selinux/selinux.c"):
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # 11. Dinamik Syscall Hooklarını Kapatıp sys_call_table'ı Koru (Crash Fix)
           stub_dict = {
               "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "**/hook/syscall_hook.c": "int ksu_syscall_hook_init(void){return 0;}\nvoid ksu_syscall_hook_exit(void){}\n",
@@ -354,7 +341,6 @@ jobs:
 
           DEFCONFIG_FILE="arch/arm64/configs/${DEVICE}_defconfig"
 
-          # Bayrakları defconfig dosyasına ekle
           {
             echo "CONFIG_OVERLAY_FS=y"
             echo "CONFIG_KALLSYMS=y"
