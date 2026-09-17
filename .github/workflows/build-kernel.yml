@@ -59,6 +59,18 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone --recursive "${{ env.KERNEL_SOURCE }}" -b "${{ env.KERNEL_SOURCE_BRANCH }}" android-kernel --depth=1
 
+      - name: Apply KernelSU 4.14 Manual Hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+          # 4.14 VFS seviyesi manuel kancalama (fs/exec.c, fs/open.c vb.)
+          if [[ -f "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" ]]; then
+            git apply "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
+            echo "[OK] KSU_HOOKS_PATCH.patch çekirdeğe başarıyla uygulandı."
+          fi
+
       - name: Setup SukiSU Source & Core Headers
         shell: bash
         run: |
@@ -278,37 +290,34 @@ jobs:
               if "/* [4.14 backport path_umount] */" not in c:
                   with open(ku, "a") as f: f.write(path_umount_stub)
 
-          # 9. KRİTİK: syscall_hook 4.14 ARM64 ABI Köprüsü (Crash Fix)
-          # 4.14'te x0=fd, x1=buf olarak gelir. Bu köprü ile regs'i task_pt_regs(current)'tan alıyoruz
-          # ve orig çağrılarını 4.14 kernel ABI'sine uygun 6 parametreye açıyoruz.
-          for sh_file in get_files("**/hook/syscall_hook.c") | get_files("**/hook/syscall_event_bridge.c"):
-              with open(sh_file, "r") as f: sc = f.read()
-              if "/* [4.14 syscall ABI bridge] */" not in sc:
-                  bridge_head = (
-                      "\n/* [4.14 syscall ABI bridge] */\n"
-                      "#include <linux/sched/task_stack.h>\n"
-                      "#include <asm/ptrace.h>\n"
-                  )
-                  # orig_sys_* çağrılarını çözen makrolar
-                  orig_funcs = set(re.findall(r'(?:orig_sys_[a-zA-Z0-9_]+)', sc))
-                  for ofn in orig_funcs:
-                      bridge_head += (
-                          f"#define {ofn}(r) (((long (*)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long))({ofn}))"
-                          f"((r)->regs[0], (r)->regs[1], (r)->regs[2], (r)->regs[3], (r)->regs[4], (r)->regs[5]))\n"
-                      )
-                  # ksu_sys_* fonksiyonlarının x0 dereference hatasını önleyen gövde enjeksiyonu
-                  def fix_hook_fn(m):
-                      fn_name = m.group(1)
-                      return (
-                          f"asmlinkage long {fn_name}(unsigned long _a0, unsigned long _a1, unsigned long _a2, unsigned long _a3, unsigned long _a4, unsigned long _a5)\n"
-                          f"{{\n"
-                          f"    struct pt_regs *regs = task_pt_regs(current);\n"
-                          f"    (void)_a0; (void)_a1; (void)_a2; (void)_a3; (void)_a4; (void)_a5;\n"
-                      )
-                  sc = re.sub(r'asmlinkage\s+long\s+(ksu_sys_[a-zA-Z0-9_]+)\s*\([^)]*regs[^)]*\)\s*\{', fix_hook_fn, sc)
-                  with open(sh_file, "w") as f:
-                      f.write(bridge_head + sc)
-                  print(f"[OK] 4.14 Syscall ABI Köprüsü uygulandı: {sh_file}")
+          # 9. KRİTİK: 4.14 Manuel Hook Köprüsü (KSU_HOOKS_PATCH bağlayıcı köprüsü)
+          manual_hook_bridge = (
+              "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
+              "#include <linux/fs.h>\n"
+              "#include <linux/types.h>\n"
+              "struct filename;\n"
+              "extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\n"
+              "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
+              "    return ksu_handle_execveat_ksud(fd, filename_ptr, argv, envp, flags);\n"
+              "}\n"
+              "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
+              "    return 0;\n"
+              "}\n"
+              "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
+              "    return 0;\n"
+              "}\n"
+              "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) {\n"
+              "    return 0;\n"
+              "}\n"
+              "int ksu_handle_devpts(struct inode *inode) {\n"
+              "    return 0;\n"
+              "}\n"
+          )
+          for ksud_f in get_files("**/runtime/ksud_integration.c"):
+              with open(ksud_f, "r") as f: c = f.read()
+              if "ksu_handle_execveat(" not in c:
+                  with open(ksud_f, "a") as f: f.write(manual_hook_bridge)
+                  print(f"[OK] 4.14 Manuel Hook Köprüsü eklendi: {ksud_f}")
 
           # 10. SELinux: selinux.c köprüsü
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
@@ -316,9 +325,14 @@ jobs:
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # 11. 4.14 Uyumsuz Modül Stubları
+          # 11. Dinamik Syscall Hooklarını Kapatıp sys_call_table'ı Koru (Crash Fix)
           stub_dict = {
               "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
+              "**/hook/syscall_hook.c": "int ksu_syscall_hook_init(void){return 0;}\nvoid ksu_syscall_hook_exit(void){}\n",
+              "**/hook/syscall_hook_manager.c": "int ksu_syscall_hook_manager_init(void){return 0;}\nvoid ksu_syscall_hook_manager_exit(void){}\n",
+              "**/hook/syscall_event_bridge.c": "int ksu_syscall_event_bridge_init(void){return 0;}\nvoid ksu_syscall_event_bridge_exit(void){}\n",
+              "**/hook/setuid_hook.c": "int ksu_setuid_hook_init(void){return 0;}\nvoid ksu_setuid_hook_exit(void){}\n",
+              "**/hook/tp_marker.c": "int ksu_tp_marker_init(void){return 0;}\nvoid ksu_tp_marker_exit(void){}\n",
               "**/manager/pkg_observer.c": "int ksu_observer_init(void){return 0;}\nvoid ksu_observer_exit(void){}\nint ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n",
               "**/selinux/rules.c": "int apply_kernelsu_rules(void){return 0;}\nint ksu_load_rules(void){return 0;}\n",
               "**/selinux/sepolicy.c": "struct selinux_policy;\nstruct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *o){return (void*)0;}\nint handle_sepolicy(unsigned long arg){return 0;}\n",
@@ -346,6 +360,7 @@ jobs:
             echo "CONFIG_KALLSYMS=y"
             echo "CONFIG_KALLSYMS_ALL=y"
             echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KPM=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
@@ -384,7 +399,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-typedef-redefinition -Wno-cast-function-type" \
+            KCFLAGS="-Wno-typedef-redefinition" \
             Image
 
       - name: Patch SukiSU Ultra KPM
