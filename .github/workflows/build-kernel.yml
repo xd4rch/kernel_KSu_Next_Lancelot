@@ -267,18 +267,7 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          path_umount_stub = (
-              "\n/* [4.14 backport path_umount] */\n"
-              "int path_umount(struct path *path, int flags) {\n"
-              "    return 0;\n"
-              "}\n"
-          )
-          for ku in get_files("**/feature/kernel_umount.c"):
-              with open(ku, "r") as f: c = f.read()
-              if "/* [4.14 backport path_umount] */" not in c:
-                  with open(ku, "a") as f: f.write(path_umount_stub)
-
-          # 4.14 Manuel Hook Köprüsü (Düzeltilmiş Doğrudan Çağrı)
+          # 4.14 Manuel Hook Köprüsü
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
