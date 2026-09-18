@@ -304,8 +304,6 @@ jobs:
 
           # Dinamik kanca motorunu kapat ve eksik yardımcı sembolleri tanımla
           syscall_hook_stub = (
-              "#include <linux/types.h>\n"
-              "#include <linux/stddef.h>\n\n"
               "void *ksu_syscall_table[512] = { 0 };\n\n"
               "int ksu_syscall_hook_init(void) { return 0; }\n"
               "void ksu_syscall_hook_exit(void) {}\n"
@@ -327,12 +325,13 @@ jobs:
               "**/cpu_spoof.c": "int ksu_cpu_spoof_init(void){return 0;}\nvoid ksu_cpu_spoof_exit(void){}\nbool ksu_is_cpu_spoof_enabled(void){return false;}\nint ksu_set_cpu_spoof(bool e){return 0;}\nint ksu_get_cpu_spoof(void){return 0;}\nint ksu_set_spoof_cpu(bool e){return 0;}\n",
               "**/infra/su_mount_ns.c": "int ksu_su_mount_ns_init(void){return 0;}\nvoid ksu_su_mount_ns_exit(void){}\nint setup_mount_ns(void){return 0;}\n"
           }
+          stub_header = "#include <linux/types.h>\n#include <linux/stddef.h>\n\n"
           for pat, code in stub_dict.items():
               targets = get_files(pat)
               if not targets:
                   print(f"[UYARI] Eşleşmeyen dosya: {pat}")
               for target in targets:
-                  with open(target, "w") as f: f.write(code)
+                  with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
           EOF
           python3 patch_sukisu_compat.py
