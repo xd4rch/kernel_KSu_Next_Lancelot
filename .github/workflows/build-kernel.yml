@@ -267,7 +267,7 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 4.14 Manuel Hook Köprüsü
+          # 4.14 Manuel Hook Köprüsü (Doğrudan Çağrı)
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
@@ -302,13 +302,13 @@ jobs:
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
+          # Dinamik kanca motorunu kapat ve eksik kanca sembolünü tanımla (tp_marker.c hariç tutuldu)
           stub_dict = {
               "**/hook/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
-              "**/hook/syscall_hook.c": "int ksu_syscall_hook_init(void){return 0;}\nvoid ksu_syscall_hook_exit(void){}\n",
+              "**/hook/syscall_hook.c": "int ksu_syscall_hook_init(void){return 0;}\nvoid ksu_syscall_hook_exit(void){}\nvoid ksu_stop_ksud_execve_hook(void){}\n",
               "**/hook/syscall_hook_manager.c": "int ksu_syscall_hook_manager_init(void){return 0;}\nvoid ksu_syscall_hook_manager_exit(void){}\n",
               "**/hook/syscall_event_bridge.c": "int ksu_syscall_event_bridge_init(void){return 0;}\nvoid ksu_syscall_event_bridge_exit(void){}\n",
               "**/hook/setuid_hook.c": "int ksu_setuid_hook_init(void){return 0;}\nvoid ksu_setuid_hook_exit(void){}\n",
-              "**/hook/tp_marker.c": "int ksu_tp_marker_init(void){return 0;}\nvoid ksu_tp_marker_exit(void){}\n",
               "**/manager/pkg_observer.c": "int ksu_observer_init(void){return 0;}\nvoid ksu_observer_exit(void){}\nint ksu_pkg_observer_init(void){return 0;}\nvoid ksu_pkg_observer_exit(void){}\n",
               "**/selinux/rules.c": "int apply_kernelsu_rules(void){return 0;}\nint ksu_load_rules(void){return 0;}\n",
               "**/selinux/sepolicy.c": "struct selinux_policy;\nstruct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *o){return (void*)0;}\nint handle_sepolicy(unsigned long arg){return 0;}\n",
