@@ -267,7 +267,7 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 4.14 Manuel Hook Köprüsü
+          # 4.14 Manuel Hook Köprüsü (Doğrudan Çağrı)
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
@@ -295,17 +295,28 @@ jobs:
               with open(ksud_f, "r") as f: c = f.read()
               if "ksu_handle_execveat(" not in c:
                   with open(ksud_f, "a") as f: f.write(manual_hook_bridge)
-                  print(f"[OK] 4.14 Manuel Hook Köprüsü eklendi: {ksud_f}")
+                  print(f"[OK] 4.14 Manuel Hook Köprüsü başarıyla eklendi: {ksud_f}")
 
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
           for sf in get_files("**/selinux/selinux.c"):
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # Dinamik GKI Kancalarını Kapatma (**/ ile alt dizin bağımsız tam eşleşme)
+          # Dinamik kanca motorunu kapat ve eksik yardımcı sembolleri tanımla
+          syscall_hook_stub = (
+              "#include <linux/types.h>\n"
+              "#include <linux/stddef.h>\n\n"
+              "void *ksu_syscall_table[512] = { 0 };\n\n"
+              "int ksu_syscall_hook_init(void) { return 0; }\n"
+              "void ksu_syscall_hook_exit(void) {}\n"
+              "void ksu_stop_ksud_execve_hook(void) {}\n"
+              "int ksu_syscall_table_hook(int nr, void *hook_fn, void **orig_fn) { return 0; }\n"
+              "int ksu_syscall_table_unhook(int nr) { return 0; }\n"
+          )
+
           stub_dict = {
               "**/lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
-              "**/syscall_hook.c": "int ksu_syscall_hook_init(void){return 0;}\nvoid ksu_syscall_hook_exit(void){}\nvoid ksu_stop_ksud_execve_hook(void){}\n",
+              "**/syscall_hook.c": syscall_hook_stub,
               "**/syscall_hook_manager.c": "int ksu_syscall_hook_manager_init(void){return 0;}\nvoid ksu_syscall_hook_manager_exit(void){}\n",
               "**/syscall_event_bridge.c": "int ksu_syscall_event_bridge_init(void){return 0;}\nvoid ksu_syscall_event_bridge_exit(void){}\n",
               "**/setuid_hook.c": "int ksu_setuid_hook_init(void){return 0;}\nvoid ksu_setuid_hook_exit(void){}\n",
@@ -321,7 +332,7 @@ jobs:
               if not targets:
                   print(f"[UYARI] Eşleşmeyen dosya: {pat}")
               for target in targets:
-                  with open(target, "w") as f: f.write("#include <linux/types.h>\n#include <linux/stddef.h>\n" + code)
+                  with open(target, "w") as f: f.write(code)
                   print(f"[OK] Stub uygulandı: {target}")
           EOF
           python3 patch_sukisu_compat.py
@@ -381,7 +392,7 @@ jobs:
             KCFLAGS="-Wno-typedef-redefinition" \
             Image
 
-          # Doğrulama: ksu_sys_fstat sembolünün derlenmediğini garantiye al
+          # Doğrulama: ksu_sys_fstat sembolünün tamamen kalktığını teyit et
           if strings out/arch/arm64/boot/Image | grep -q "ksu_sys_fstat"; then
             echo "HATA: ksu_sys_fstat hala kernel içinde mevcut!"
             exit 1
