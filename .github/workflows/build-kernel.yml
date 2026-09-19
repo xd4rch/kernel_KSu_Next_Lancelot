@@ -237,13 +237,16 @@ jobs:
               if "SECCOMP_ARCH_NATIVE_NR" not in c:
                   with open(sc, "w") as f: f.write("#include <asm/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#endif\n" + c)
 
-          all_c = get_files("drivers/kernelsu/**/*.c") | get_files("KernelSU/**/*.c")
+          all_files = get_files("drivers/kernelsu/**/*.[ch]") | get_files("KernelSU/**/*.[ch]")
           sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
-          for cf in all_c:
+          for cf in all_files:
               with open(cf, "r") as f: c = f.read()
               c = c.replace("copy_from_user_nofault", "copy_from_user").replace("copy_to_user_nofault", "copy_to_user").replace("strncpy_from_user_nofault", "strncpy_from_user")
               c = c.replace("<linux/minmax.h>", "<linux/kernel.h>")
               c = re.sub(r'.*filter_count.*', '// [4.14 seccomp]', c)
+              # 4.14 ksys_close -> sys_close köprüsü
+              if "ksys_close" in c:
+                  c = "#include <linux/syscalls.h>\n" + c.replace("ksys_close", "sys_close")
               if any(k in c for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in c:
                   c = "#include <linux/uaccess.h>\n" + c
               if "put_task_struct" in c and "<linux/sched/task.h>" not in c:
@@ -348,6 +351,7 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
+          # Supercall Reboot Köprüsü
           bridge_code = (
               "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
