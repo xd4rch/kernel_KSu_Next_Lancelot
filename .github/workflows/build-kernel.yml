@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Compatibility Shims
+      - name: Apply SukiSU 4.14 Compatibility Shims & Supercall Reboot Hook
         shell: bash
         run: |
           set -euo pipefail
@@ -173,6 +173,7 @@ jobs:
           def get_files(pattern):
               return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
+          # 1. Syscall prototip tanımı
           fn_t = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n#define _SUKISU_SYSCALL_FN_T_\n"
               "#include <linux/compiler.h>\n#include <linux/types.h>\nstruct pt_regs;\n"
@@ -200,6 +201,7 @@ jobs:
               c = c.replace("__flush_icache_range", "flush_icache_range").replace("copy_to_kernel_nofault", "probe_kernel_write")
               with open(pm, "w") as f: f.write(pm_h + c)
 
+          # 2. File wrapper & Anon FD oluşturucu
           fw_h = (
               "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n#define _SUKISU_FILE_WRAPPER_4_14_\n"
               "#include <linux/version.h>\n#include <linux/fs.h>\n#include <linux/file.h>\n"
@@ -267,25 +269,27 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 4.14 Manuel Hook Köprüsü (Doğrudan Çağrı)
+          # 3. 4.14 Manuel Hook Köprüsü (VFS + sucompat + ksud)
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
-              "#include <linux/binfmts.h>\n\n"
+              "#include <linux/file.h>\n"
+              "#include <linux/binfmts.h>\n"
+              "extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n"
+              "extern int ksu_handle_stat_sucompat(int *dfd, const char __user **filename_user, int *flags);\n"
+              "extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
+              "extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr);\n\n"
               "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
               "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
               "        ksu_handle_execveat_ksud((*filename_ptr)->name, (struct user_arg_ptr *)argv);\n"
               "    }\n"
-              "    return 0;\n"
+              "    return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);\n"
               "}\n\n"
               "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
-              "    return 0;\n"
+              "    return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);\n"
               "}\n\n"
               "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
-              "    return 0;\n"
-              "}\n\n"
-              "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) {\n"
-              "    return 0;\n"
+              "    return ksu_handle_stat_sucompat(dfd, filename_user, flags);\n"
               "}\n\n"
               "int ksu_handle_devpts(struct inode *inode) {\n"
               "    return 0;\n"
@@ -295,14 +299,14 @@ jobs:
               with open(ksud_f, "r") as f: c = f.read()
               if "ksu_handle_execveat(" not in c:
                   with open(ksud_f, "a") as f: f.write(manual_hook_bridge)
-                  print(f"[OK] 4.14 Manuel Hook Köprüsü başarıyla eklendi: {ksud_f}")
+                  print(f"[OK] 4.14 Manuel Hook Köprüsü eklendi: {ksud_f}")
 
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
           for sf in get_files("**/selinux/selinux.c"):
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # Dinamik kanca motorunu kapat ve eksik yardımcı sembolleri tanımla
+          # 4. Dinamik kancaları devreden çıkar
           syscall_hook_stub = (
               "void *ksu_syscall_table[512] = { 0 };\n\n"
               "int ksu_syscall_hook_init(void) { return 0; }\n"
@@ -327,12 +331,63 @@ jobs:
           }
           stub_header = "#include <linux/types.h>\n#include <linux/stddef.h>\n\n"
           for pat, code in stub_dict.items():
-              targets = get_files(pat)
-              if not targets:
-                  print(f"[UYARI] Eşleşmeyen dosya: {pat}")
-              for target in targets:
+              for target in get_files(pat):
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
+
+          # 5. Supercall Reboot Köprüsü (reboot(0xdeadbeef, 0xcafebabe) yakalayıcı)
+          bridge_code = (
+              "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
+              "#include <linux/fs.h>\n"
+              "#include <linux/file.h>\n"
+              "#include <linux/syscalls.h>\n"
+              "extern long ksu_supercall_handle_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);\n"
+              "static const struct file_operations ksu_reboot_sc_fops = {\n"
+              "    .owner = THIS_MODULE,\n"
+              "    .unlocked_ioctl = ksu_supercall_handle_ioctl,\n"
+              "    .compat_ioctl = ksu_supercall_handle_ioctl,\n"
+              "};\n"
+              "int ksu_handle_reboot_supercall(int magic1, int magic2) {\n"
+              "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
+              "        int fd = get_unused_fd_flags(O_CLOEXEC);\n"
+              "        struct file *filp;\n"
+              "        if (fd < 0) return fd;\n"
+              "        filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_reboot_sc_fops, NULL, O_RDWR);\n"
+              "        if (IS_ERR(filp)) {\n"
+              "            put_unused_fd(fd);\n"
+              "            return PTR_ERR(filp);\n"
+              "        }\n"
+              "        fd_install(fd, filp);\n"
+              "        return fd;\n"
+              "    }\n"
+              "    return 0;\n"
+              "}\n"
+          )
+          for d_file in get_files("**/supercall/dispatch.c"):
+              with open(d_file, "a") as f:
+                  f.write(bridge_code)
+                  print(f"[OK] Supercall Reboot Handler dispatch.c içine eklendi: {d_file}")
+
+          # 6. kernel/reboot.c dosyasını yamala
+          reboot_c = "kernel/reboot.c"
+          if os.path.exists(reboot_c):
+              with open(reboot_c, "r") as f: rc = f.read()
+              hook_str = (
+                  "\n#if defined(CONFIG_KSU)\n"
+                  "    extern int ksu_handle_reboot_supercall(int magic1, int magic2);\n"
+                  "    int _ksu_fd = ksu_handle_reboot_supercall(magic1, magic2);\n"
+                  "    if (_ksu_fd > 0) return _ksu_fd;\n"
+                  "#endif\n"
+              )
+              if "ksu_handle_reboot_supercall" not in rc:
+                  # SYSCALL_DEFINE4(reboot, ...) gövdesinin hemen girişine ekle
+                  target_pos = rc.find("SYSCALL_DEFINE4(reboot")
+                  if target_pos != -1:
+                      brace_pos = rc.find("{", target_pos)
+                      if brace_pos != -1:
+                          rc = rc[:brace_pos+1] + hook_str + rc[brace_pos+1:]
+                          with open(reboot_c, "w") as f: f.write(rc)
+                          print("[OK] kernel/reboot.c içine SukiSU doğrudan kancası yerleştirildi!")
           EOF
           python3 patch_sukisu_compat.py
 
@@ -391,7 +446,6 @@ jobs:
             KCFLAGS="-Wno-typedef-redefinition" \
             Image
 
-          # Doğrulama: ksu_sys_fstat sembolünün tamamen kalktığını teyit et
           if strings out/arch/arm64/boot/Image | grep -q "ksu_sys_fstat"; then
             echo "HATA: ksu_sys_fstat hala kernel içinde mevcut!"
             exit 1
