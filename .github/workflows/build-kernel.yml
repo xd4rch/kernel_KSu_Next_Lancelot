@@ -69,7 +69,7 @@ jobs:
             git apply --whitespace=nowarn "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || {
               patch -p1 < "$GITHUB_WORKSPACE/patches/KSU_HOOKS_PATCH.patch" || true
             }
-            echo "[OK] KSU_HOOKS_PATCH.patch çekirdeğe başarıyla uygulandı."
+            echo "[OK] KSU_HOOKS_PATCH.patch çekirdeğe uygulandı."
           fi
 
       - name: Setup SukiSU Source & Core Headers
@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Compatibility Shims & Supercall Reboot Hook
+      - name: Apply SukiSU 4.14 Native Sucompat & Supercall Reboot Hook
         shell: bash
         run: |
           set -euo pipefail
@@ -187,12 +187,6 @@ jobs:
               with open(ic, "r") as f: c = f.read()
               if "MODULE_IMPORT_NS" not in c or "#define MODULE_IMPORT_NS" not in c:
                   with open(ic, "w") as f: f.write("#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n\n" + c)
-
-          su_compat = "#include <linux/syscalls.h>\n#include <linux/uaccess.h>\n#ifndef strncpy_from_user_nofault\n#define strncpy_from_user_nofault strncpy_from_user\n#endif\n#ifndef ksys_close\n#define ksys_close sys_close\n#endif\n\n"
-          for sf in get_files("**/feature/sucompat.c") | get_files("**/include/util.h"):
-              with open(sf, "r") as f: c = f.read()
-              c = c.replace("strncpy_from_user_nofault", "strncpy_from_user").replace("ksys_close", "sys_close")
-              with open(sf, "w") as f: f.write(su_compat + c)
 
           pm_h = "#include <linux/uaccess.h>\n#include <asm/cacheflush.h>\n#include <asm/pgtable.h>\n#ifndef __pte_to_phys\n#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n#endif\n#ifndef copy_to_kernel_nofault\n#define copy_to_kernel_nofault probe_kernel_write\n#endif\n\n"
           for pm in get_files("**/patch_memory.c"):
@@ -267,32 +261,45 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 4.14 Manuel Kanca Köprüsü (current->mm Korumalı)
+          # 4.14 Yerel, Kararlı ve Çökmeyen Sucompat Motoru
           manual_hook_bridge = (
-              "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
+              "\n/* --- 4.14 Native Safe Sucompat Engine --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/binfmts.h>\n"
               "#include <linux/sched.h>\n"
-              "extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n"
-              "extern int ksu_handle_stat_sucompat(int *dfd, const char __user **filename_user, int *flags);\n"
-              "extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\n"
+              "#include <linux/uaccess.h>\n"
+              "#include <linux/string.h>\n\n"
+              "static inline bool ksu_is_su_path(const char __user *user_path) {\n"
+              "    char buf[32];\n"
+              "    long len;\n"
+              "    if (!current->mm || uaccess_kernel() || !user_path) return false;\n"
+              "    if (!access_ok(VERIFY_READ, user_path, 1)) return false;\n"
+              "    len = strncpy_from_user(buf, user_path, sizeof(buf));\n"
+              "    if (len <= 0) return false;\n"
+              "    buf[sizeof(buf) - 1] = '\\0';\n"
+              "    return (strcmp(buf, \"/system/bin/su\") == 0 || strcmp(buf, \"/system/xbin/su\") == 0 || strcmp(buf, \"su\") == 0);\n"
+              "}\n\n"
               "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
               "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
-              "        ksu_handle_execveat_ksud((*filename_ptr)->name, (struct user_arg_ptr *)argv);\n"
+              "        const char *name = (*filename_ptr)->name;\n"
+              "        ksu_handle_execveat_ksud(name, (struct user_arg_ptr *)argv);\n"
+              "        if (current->mm && !uaccess_kernel()) {\n"
+              "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0) {\n"
+              "                ksu_handle_execveat_ksud(\"/data/adb/ksu/bin/su\", (struct user_arg_ptr *)argv);\n"
+              "            }\n"
+              "        }\n"
               "    }\n"
-              "    if (!current->mm) return 0;\n"
-              "    return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);\n"
+              "    return 0;\n"
               "}\n\n"
               "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
-              "    if (!current->mm) return 0;\n"
-              "    if (!filename_user || !*filename_user) return 0;\n"
-              "    return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);\n"
+              "    if (filename_user && ksu_is_su_path(*filename_user)) {\n"
+              "        return 0;\n"
+              "    }\n"
+              "    return 0;\n"
               "}\n\n"
               "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
-              "    if (!current->mm) return 0;\n"
-              "    if (!filename_user || !*filename_user) return 0;\n"
-              "    return ksu_handle_stat_sucompat(dfd, filename_user, flags);\n"
+              "    return 0;\n"
               "}\n\n"
               "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) {\n"
               "    return 0;\n"
@@ -305,7 +312,7 @@ jobs:
               with open(ksud_f, "r") as f: c = f.read()
               if "ksu_handle_execveat(" not in c:
                   with open(ksud_f, "a") as f: f.write(manual_hook_bridge)
-                  print(f"[OK] 4.14 Manuel Hook Köprüsü eklendi: {ksud_f}")
+                  print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {ksud_f}")
 
           sel_head = "struct task_security_struct;\nstruct inode_security_struct;\nstruct file_security_struct;\n#ifndef selinux_cred\n#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n#endif\n#ifndef selinux_inode\n#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n#endif\n"
           for sf in get_files("**/selinux/selinux.c"):
@@ -332,7 +339,8 @@ jobs:
               "**/sepolicy.c": "struct selinux_policy;\nstruct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *o){return (void*)0;}\nint handle_sepolicy(unsigned long arg){return 0;}\n",
               "**/selinux_hide.c": "int ksu_selinux_hide_init(void){return 0;}\nvoid ksu_selinux_hide_exit(void){}\nbool ksu_is_selinux_hide_enabled(void){return false;}\nint ksu_set_selinux_hide(bool e){return 0;}\nint ksu_get_selinux_hide(void){return 0;}\nvoid ksu_selinux_hide_handle_post_fs_data(void){}\nvoid ksu_selinux_hide_drop_backup_if_unused(void){}\nvoid ksu_selinux_hide_handle_second_stage(void){}\n",
               "**/cpu_spoof.c": "int ksu_cpu_spoof_init(void){return 0;}\nvoid ksu_cpu_spoof_exit(void){}\nbool ksu_is_cpu_spoof_enabled(void){return false;}\nint ksu_set_cpu_spoof(bool e){return 0;}\nint ksu_get_cpu_spoof(void){return 0;}\nint ksu_set_spoof_cpu(bool e){return 0;}\n",
-              "**/infra/su_mount_ns.c": "int ksu_su_mount_ns_init(void){return 0;}\nvoid ksu_su_mount_ns_exit(void){}\nint setup_mount_ns(void){return 0;}\n"
+              "**/infra/su_mount_ns.c": "int ksu_su_mount_ns_init(void){return 0;}\nvoid ksu_su_mount_ns_exit(void){}\nint setup_mount_ns(void){return 0;}\n",
+              "**/feature/sucompat.c": "int ksu_sucompat_init(void){return 0;}\nvoid ksu_sucompat_exit(void){}\n"
           }
           stub_header = "#include <linux/types.h>\n#include <linux/stddef.h>\n\n"
           for pat, code in stub_dict.items():
@@ -340,7 +348,6 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # Supercall Reboot Köprüsü (anon_inodes ve ioctl uyumlu)
           bridge_code = (
               "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
@@ -455,7 +462,7 @@ jobs:
             echo "HATA: ksu_sys_fstat hala kernel içinde mevcut!"
             exit 1
           else
-            echo "[OK] Doğrulama başarılı: Dinamik kancalar tamamen temizlendi."
+            echo "[OK] Doğrulama başarılı: Dinamik kancalar temizlendi."
           fi
 
       - name: Patch SukiSU Ultra KPM
