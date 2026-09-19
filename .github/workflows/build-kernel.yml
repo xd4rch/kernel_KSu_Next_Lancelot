@@ -267,11 +267,13 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
+          # 4.14 Manuel Kanca Köprüsü (current->mm Korumalı)
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/binfmts.h>\n"
+              "#include <linux/sched.h>\n"
               "extern int ksu_handle_faccessat_sucompat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n"
               "extern int ksu_handle_stat_sucompat(int *dfd, const char __user **filename_user, int *flags);\n"
               "extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\n"
@@ -279,12 +281,17 @@ jobs:
               "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
               "        ksu_handle_execveat_ksud((*filename_ptr)->name, (struct user_arg_ptr *)argv);\n"
               "    }\n"
+              "    if (!current->mm) return 0;\n"
               "    return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);\n"
               "}\n\n"
               "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
+              "    if (!current->mm) return 0;\n"
+              "    if (!filename_user || !*filename_user) return 0;\n"
               "    return ksu_handle_faccessat_sucompat(dfd, filename_user, mode, flags);\n"
               "}\n\n"
               "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
+              "    if (!current->mm) return 0;\n"
+              "    if (!filename_user || !*filename_user) return 0;\n"
               "    return ksu_handle_stat_sucompat(dfd, filename_user, flags);\n"
               "}\n\n"
               "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) {\n"
@@ -333,6 +340,7 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
+          # Supercall Reboot Köprüsü (anon_inodes ve ioctl uyumlu)
           bridge_code = (
               "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
