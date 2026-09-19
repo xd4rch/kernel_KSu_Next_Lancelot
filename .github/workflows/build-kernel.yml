@@ -173,7 +173,6 @@ jobs:
           def get_files(pattern):
               return {os.path.realpath(p) for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)}
 
-          # 1. Syscall prototip tanımı
           fn_t = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n#define _SUKISU_SYSCALL_FN_T_\n"
               "#include <linux/compiler.h>\n#include <linux/types.h>\nstruct pt_regs;\n"
@@ -201,7 +200,6 @@ jobs:
               c = c.replace("__flush_icache_range", "flush_icache_range").replace("copy_to_kernel_nofault", "probe_kernel_write")
               with open(pm, "w") as f: f.write(pm_h + c)
 
-          # 2. File wrapper & Anon FD oluşturucu
           fw_h = (
               "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n#define _SUKISU_FILE_WRAPPER_4_14_\n"
               "#include <linux/version.h>\n#include <linux/fs.h>\n#include <linux/file.h>\n"
@@ -269,7 +267,6 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 3. 4.14 Manuel Hook Köprüsü (VFS + sucompat + ksud)
           manual_hook_bridge = (
               "\n/* --- 4.14 Manual Hook Bridge for SukiSU --- */\n"
               "#include <linux/fs.h>\n"
@@ -306,7 +303,6 @@ jobs:
               with open(sf, "r") as f: c = f.read()
               with open(sf, "w") as f: f.write(sel_head + c)
 
-          # 4. Dinamik kancaları devreden çıkar
           syscall_hook_stub = (
               "void *ksu_syscall_table[512] = { 0 };\n\n"
               "int ksu_syscall_hook_init(void) { return 0; }\n"
@@ -335,52 +331,52 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # 5. Supercall Reboot Köprüsü (reboot(0xdeadbeef, 0xcafebabe) yakalayıcı)
+          # Supercall Reboot Köprüsü (Tip ve İmza Düzeltildi)
           bridge_code = (
               "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
-              "#include <linux/syscalls.h>\n"
-              "extern long ksu_supercall_handle_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);\n"
+              "#include <linux/anon_inodes.h>\n"
+              "#include <linux/err.h>\n\n"
+              "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
+              "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
+              "}\n\n"
               "static const struct file_operations ksu_reboot_sc_fops = {\n"
               "    .owner = THIS_MODULE,\n"
-              "    .unlocked_ioctl = ksu_supercall_handle_ioctl,\n"
-              "    .compat_ioctl = ksu_supercall_handle_ioctl,\n"
-              "};\n"
-              "int ksu_handle_reboot_supercall(int magic1, int magic2) {\n"
-              "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
-              "        int fd = get_unused_fd_flags(O_CLOEXEC);\n"
-              "        struct file *filp;\n"
-              "        if (fd < 0) return fd;\n"
-              "        filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_reboot_sc_fops, NULL, O_RDWR);\n"
-              "        if (IS_ERR(filp)) {\n"
-              "            put_unused_fd(fd);\n"
-              "            return PTR_ERR(filp);\n"
-              "        }\n"
-              "        fd_install(fd, filp);\n"
-              "        return fd;\n"
+              "    .unlocked_ioctl = ksu_reboot_sc_ioctl,\n"
+              "    .compat_ioctl = ksu_reboot_sc_ioctl,\n"
+              "};\n\n"
+              "int ksu_handle_reboot_supercall(void);\n"
+              "int ksu_handle_reboot_supercall(void) {\n"
+              "    int fd = get_unused_fd_flags(O_CLOEXEC);\n"
+              "    struct file *filp;\n"
+              "    if (fd < 0) return fd;\n"
+              "    filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_reboot_sc_fops, NULL, O_RDWR);\n"
+              "    if (IS_ERR(filp)) {\n"
+              "        put_unused_fd(fd);\n"
+              "        return PTR_ERR(filp);\n"
               "    }\n"
-              "    return 0;\n"
+              "    fd_install(fd, filp);\n"
+              "    return fd;\n"
               "}\n"
           )
           for d_file in get_files("**/supercall/dispatch.c"):
               with open(d_file, "a") as f:
                   f.write(bridge_code)
-                  print(f"[OK] Supercall Reboot Handler dispatch.c içine eklendi: {d_file}")
+                  print(f"[OK] Supercall Reboot Köprüsü dispatch.c içine eklendi: {d_file}")
 
-          # 6. kernel/reboot.c dosyasını yamala
           reboot_c = "kernel/reboot.c"
           if os.path.exists(reboot_c):
               with open(reboot_c, "r") as f: rc = f.read()
               hook_str = (
                   "\n#if defined(CONFIG_KSU)\n"
-                  "    extern int ksu_handle_reboot_supercall(int magic1, int magic2);\n"
-                  "    int _ksu_fd = ksu_handle_reboot_supercall(magic1, magic2);\n"
-                  "    if (_ksu_fd > 0) return _ksu_fd;\n"
+                  "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
+                  "        extern int ksu_handle_reboot_supercall(void);\n"
+                  "        return ksu_handle_reboot_supercall();\n"
+                  "    }\n"
                   "#endif\n"
               )
               if "ksu_handle_reboot_supercall" not in rc:
-                  # SYSCALL_DEFINE4(reboot, ...) gövdesinin hemen girişine ekle
                   target_pos = rc.find("SYSCALL_DEFINE4(reboot")
                   if target_pos != -1:
                       brace_pos = rc.find("{", target_pos)
