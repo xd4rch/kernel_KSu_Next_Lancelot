@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat & Supercall Reboot Hook
+      - name: Apply SukiSU 4.14 Native Sucompat & Secure Supercall Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -253,15 +253,13 @@ jobs:
               if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
                   c = sched_b + c
 
-              # ksu_is_manager fonksiyonunun root (uid=0) süreçleri kabul etmesini sağla
-              if "bool ksu_is_manager(" in c:
-                  c = c.replace("bool ksu_is_manager(void)\n{", "bool ksu_is_manager(void)\n{\n    if (current_uid().val == 0) return true;")
-                  c = c.replace("bool ksu_is_manager(void) {", "bool ksu_is_manager(void) {\n    if (current_uid().val == 0) return true;")
-
-              # Supercall ioctl izin bloğunu baypas et (fd sahibi zaten parolayla doğrulandı)
+              # Supercall perm.c içinde yetki kontrolünü root (uid=0) ve resmi yönetici (ksu_manager_appid) için güvenle aç
               if "permission denied for cmd" in c:
-                  c = re.sub(r'pr_err\([^)]*permission denied for cmd[^)]*\);\s*return\s+-EPERM;',
-                             'pr_info("KernelSU: bypassing supercall perm check for cmd=0x%x uid=%d\\n", cmd, current_uid().val);', c)
+                  c = "#include <linux/cred.h>\nextern unsigned int ksu_manager_appid;\n" + c
+                  c = c.replace(
+                      'pr_err("ksu ioctl: permission denied for cmd',
+                      'if (current_uid().val == 0 || (ksu_manager_appid != 0 && (current_uid().val % 100000) == ksu_manager_appid)) return 0;\n    pr_err("ksu ioctl: permission denied for cmd'
+                  )
 
               with open(cf, "w") as f: f.write(c)
 
@@ -360,20 +358,54 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # Supercall Reboot Köprüsü: Yönetici UID'sini otomatik kaydeder
+          # Kriptografik APK Doğrulamalı Güvenli Supercall Reboot Köprüsü
           bridge_code = (
-              "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
+              "\n/* --- SukiSU Secure Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/anon_inodes.h>\n"
               "#include <linux/err.h>\n"
-              "#include <linux/uaccess.h>\n\n"
+              "#include <linux/uaccess.h>\n"
+              "#include <linux/mm.h>\n"
+              "#include <linux/sched/mm.h>\n"
+              "#include <linux/dcache.h>\n\n"
+              "extern bool ksu_is_manager_apk(const char *path);\n"
               "extern unsigned int ksu_manager_appid;\n\n"
-              "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
-              "    uid_t uid = current_uid().val;\n"
-              "    if (uid >= 10000 && ksu_manager_appid == 0) {\n"
-              "        ksu_manager_appid = uid % 100000;\n"
+              "static bool ksu_verify_current_is_manager(void) {\n"
+              "    struct mm_struct *mm = current->mm;\n"
+              "    struct vm_area_struct *vma;\n"
+              "    char *page_buf;\n"
+              "    char apk_path[256];\n"
+              "    bool found_apk = false;\n"
+              "    bool is_manager = false;\n"
+              "    if (!mm) return false;\n"
+              "    page_buf = (char *)__get_free_page(GFP_KERNEL);\n"
+              "    if (!page_buf) return false;\n"
+              "    down_read(&mm->mmap_sem);\n"
+              "    for (vma = mm->mmap; vma; vma = vma->vm_next) {\n"
+              "        if (vma->vm_file) {\n"
+              "            char *path_str = d_path(&vma->vm_file->f_path, page_buf, PAGE_SIZE);\n"
+              "            if (!IS_ERR(path_str)) {\n"
+              "                if (strstr(path_str, \"/data/app/\") && strstr(path_str, \".apk\")) {\n"
+              "                    strncpy(apk_path, path_str, sizeof(apk_path) - 1);\n"
+              "                    apk_path[sizeof(apk_path) - 1] = '\\0';\n"
+              "                    found_apk = true;\n"
+              "                    break;\n"
+              "                }\n"
+              "            }\n"
+              "        }\n"
               "    }\n"
+              "    up_read(&mm->mmap_sem);\n"
+              "    free_page((unsigned long)page_buf);\n"
+              "    if (found_apk) {\n"
+              "        is_manager = ksu_is_manager_apk(apk_path);\n"
+              "        if (is_manager) {\n"
+              "            pr_info(\"KernelSU: Cryptographically verified Manager APK: %s\\n\", apk_path);\n"
+              "        }\n"
+              "    }\n"
+              "    return is_manager;\n"
+              "}\n\n"
+              "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
               "static const struct file_operations ksu_reboot_sc_fops = {\n"
@@ -383,12 +415,19 @@ jobs:
               "};\n\n"
               "int ksu_handle_reboot_supercall(void __user *arg);\n"
               "int ksu_handle_reboot_supercall(void __user *arg) {\n"
-              "    int fd = get_unused_fd_flags(O_CLOEXEC);\n"
-              "    struct file *filp;\n"
               "    uid_t uid = current_uid().val;\n"
               "    if (uid >= 10000) {\n"
-              "        ksu_manager_appid = uid % 100000;\n"
+              "        if (ksu_verify_current_is_manager()) {\n"
+              "            ksu_manager_appid = uid % 100000;\n"
+              "        } else {\n"
+              "            pr_warn(\"KernelSU: Untrusted app (uid=%d) attempted supercall reboot\\n\", uid);\n"
+              "            return -EPERM;\n"
+              "        }\n"
+              "    } else if (uid != 0) {\n"
+              "        return -EPERM;\n"
               "    }\n"
+              "    int fd = get_unused_fd_flags(O_CLOEXEC);\n"
+              "    struct file *filp;\n"
               "    if (fd < 0) return fd;\n"
               "    filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_reboot_sc_fops, NULL, O_RDWR);\n"
               "    if (IS_ERR(filp)) {\n"
@@ -408,7 +447,7 @@ jobs:
           for d_file in get_files("**/supercall/dispatch.c"):
               with open(d_file, "a") as f:
                   f.write(bridge_code)
-                  print(f"[OK] Supercall Reboot Köprüsü dispatch.c içine eklendi: {d_file}")
+                  print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {d_file}")
 
           reboot_c = "kernel/reboot.c"
           if os.path.exists(reboot_c):
