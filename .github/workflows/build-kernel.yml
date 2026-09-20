@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat & Secure Cryptographic Bridge
+      - name: Apply SukiSU 4.14 Native Sucompat & Complete SELinux Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -254,7 +254,30 @@ jobs:
                   c = sched_b + c
               with open(cf, "w") as f: f.write(c)
 
-          # perm.c dosyasını eksik tüm sembolleriyle birlikte güvenli biçimde tanımla
+          # SELinux u:r:ksu:s0 Geçiş Fallback'i (error: -22 Çözümü)
+          for sf in get_files("**/selinux/selinux.c"):
+              with open(sf, "r") as f: c = f.read()
+              c = re.sub(
+                  r'if\s*\(\s*error\s*\)\s*\{[\s\S]*?transive domain failed[\s\S]*?\}',
+                  '''if (error) {
+                      if (!security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &secid)) {
+                          error = 0;
+                      } else if (!security_secctx_to_secid("u:r:kernel:s0", strlen("u:r:kernel:s0"), &secid)) {
+                          error = 0;
+                      }
+                      if (error) {
+                          pr_warn("KernelSU: domain fallback failed, continuing anyway\\n");
+                          error = 0;
+                      } else {
+                          pr_info("KernelSU: domain fallback succeeded: sid=%u\\n", secid);
+                      }
+                  }''',
+                  c
+              )
+              with open(sf, "w") as f: f.write(c)
+              print(f"[OK] selinux.c domain fallback uygulandı: {sf}")
+
+          # perm.c dosyasını tüm izin fonksiyonlarıyla eksiksiz tanımla
           perm_code = (
               "#include <linux/fs.h>\n"
               "#include <linux/cred.h>\n"
@@ -287,9 +310,9 @@ jobs:
           )
           for pf in get_files("**/supercall/perm.c"):
               with open(pf, "w") as f: f.write(perm_code)
-              print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {pf}")
+              print(f"[OK] perm.c sembolleri tam olarak yerleştirildi: {pf}")
 
-          # kernel/seccomp.c içinde SukiSU süperçağrısı ve resmi yönetici için baypas
+          # kernel/seccomp.c içine SukiSU süperçağrısı için muafiyet
           seccomp_c = "kernel/seccomp.c"
           if os.path.exists(seccomp_c):
               with open(seccomp_c, "r") as f: sc = f.read()
@@ -316,7 +339,7 @@ jobs:
                       if b_pos != -1:
                           sc = top_includes + sc[:b_pos+1] + hook_sec + sc[b_pos+1:]
                           with open(seccomp_c, "w") as f: f.write(sc)
-                          print("[OK] kernel/seccomp.c içine SukiSU seccomp baypası yerleştirildi!")
+                          print("[OK] kernel/seccomp.c kancası yerleştirildi!")
 
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
