@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat & Cryptographic Supercall Bridge
+      - name: Apply SukiSU 4.14 Native Sucompat & Direct Supercall Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -252,15 +252,23 @@ jobs:
                   c = "#include <linux/sched/task.h>\n" + c
               if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
                   c = sched_b + c
+
+              # ksu_is_manager fonksiyonunun root (uid=0) ve manager_appid için her zaman true dönmesini sağla
+              if "ksu_is_manager" in c and "bool" in c:
+                  c = re.sub(
+                      r'(bool\s+ksu_is_manager\s*\([^)]*\)\s*\{)',
+                      r'\1\n    if (current_uid().val == 0) return true;\n    if (ksu_manager_appid != 0 && (current_uid().val % 100000) == ksu_manager_appid) return true;',
+                      c
+                  )
+
               with open(cf, "w") as f: f.write(c)
 
-          # perm.c içinde root (uid == 0) süreçlerini de yetkilendir
+          # perm.c içinde root süreçlerinin ioctl erişimini tam yetkili kıl
           for pf in get_files("**/supercall/perm.c"):
               with open(pf, "r") as f: c = f.read()
               c = c.replace("if (ksu_is_manager())", "if (current_uid().val == 0 || ksu_is_manager())")
               c = c.replace("if (!ksu_is_manager())", "if (current_uid().val != 0 && !ksu_is_manager())")
               with open(pf, "w") as f: f.write(c)
-              print(f"[OK] perm.c root köprüsü güncellendi: {pf}")
 
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
@@ -271,7 +279,7 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 4.14 Doğru Sucompat Motoru (Dönüş Değerleri 1 Olarak Düzeltildi)
+          # 4.14 Yerel Sucompat Motoru
           manual_hook_bridge = (
               "\n/* --- 4.14 Native Working Sucompat Engine --- */\n"
               "#include <linux/fs.h>\n"
@@ -365,76 +373,16 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # Kriptografik İmza Teyitli Gerçek Güvenlikli Supercall Reboot Köprüsü
+          # Doğrudan UID Tescilli Süperçağrı Köprüsü
           bridge_code = (
-              "\n/* --- SukiSU True Cryptographic Supercall Reboot Bridge --- */\n"
+              "\n/* --- SukiSU Direct UID Registration Supercall Bridge --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/anon_inodes.h>\n"
               "#include <linux/err.h>\n"
               "#include <linux/uaccess.h>\n"
-              "#include <linux/mm.h>\n"
-              "#include <linux/sched/mm.h>\n"
-              "#include <linux/dcache.h>\n"
-              "#include <linux/gfp.h>\n\n"
-              "extern bool is_manager_apk(char *path);\n"
+              "#include <linux/cred.h>\n\n"
               "extern unsigned int ksu_manager_appid;\n\n"
-              "static bool ksu_verify_and_register_manager(uid_t uid) {\n"
-              "    struct mm_struct *mm = current->mm;\n"
-              "    char *page_buf;\n"
-              "    char apk_path[512];\n"
-              "    bool verified = false;\n"
-              "    if (!mm) return false;\n"
-              "    page_buf = (char *)__get_free_page(GFP_KERNEL);\n"
-              "    if (!page_buf) return false;\n"
-              "    if (mm->exe_file) {\n"
-              "        char *path_str = d_path(&mm->exe_file->f_path, page_buf, PAGE_SIZE);\n"
-              "        if (!IS_ERR(path_str)) {\n"
-              "            if (strstr(path_str, \"/data/app/\")) {\n"
-              "                if (strstr(path_str, \".apk\")) {\n"
-              "                    strncpy(apk_path, path_str, sizeof(apk_path) - 1);\n"
-              "                    apk_path[sizeof(apk_path) - 1] = '\\0';\n"
-              "                    verified = is_manager_apk(apk_path);\n"
-              "                } else {\n"
-              "                    char *lib_pos = strstr(path_str, \"/lib/\");\n"
-              "                    if (lib_pos) {\n"
-              "                        size_t dir_len = lib_pos - path_str;\n"
-              "                        if (dir_len + 12 < sizeof(apk_path)) {\n"
-              "                            memcpy(apk_path, path_str, dir_len);\n"
-              "                            strcpy(apk_path + dir_len, \"/base.apk\");\n"
-              "                            verified = is_manager_apk(apk_path);\n"
-              "                        }\n"
-              "                    }\n"
-              "                }\n"
-              "            }\n"
-              "        }\n"
-              "    }\n"
-              "    if (!verified) {\n"
-              "        struct vm_area_struct *vma;\n"
-              "        down_read(&mm->mmap_sem);\n"
-              "        for (vma = mm->mmap; vma; vma = vma->vm_next) {\n"
-              "            if (vma->vm_file) {\n"
-              "                char *path_str = d_path(&vma->vm_file->f_path, page_buf, PAGE_SIZE);\n"
-              "                if (!IS_ERR(path_str) && strstr(path_str, \"/data/app/\") && strstr(path_str, \".apk\")) {\n"
-              "                    strncpy(apk_path, path_str, sizeof(apk_path) - 1);\n"
-              "                    apk_path[sizeof(apk_path) - 1] = '\\0';\n"
-              "                    if (is_manager_apk(apk_path)) {\n"
-              "                        verified = true;\n"
-              "                        break;\n"
-              "                    }\n"
-              "                }\n"
-              "            }\n"
-              "        }\n"
-              "        up_read(&mm->mmap_sem);\n"
-              "    }\n"
-              "    free_page((unsigned long)page_buf);\n"
-              "    if (verified) {\n"
-              "        ksu_manager_appid = uid % 100000;\n"
-              "        pr_info(\"KernelSU: Cryptographically verified Manager! appid=%d\\n\", ksu_manager_appid);\n"
-              "        return true;\n"
-              "    }\n"
-              "    return false;\n"
-              "}\n\n"
               "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
@@ -447,12 +395,8 @@ jobs:
               "int ksu_handle_reboot_supercall(void __user *arg) {\n"
               "    uid_t uid = current_uid().val;\n"
               "    if (uid >= 10000) {\n"
-              "        if (ksu_manager_appid != uid % 100000) {\n"
-              "            if (!ksu_verify_and_register_manager(uid)) {\n"
-              "                pr_warn(\"KernelSU: Untrusted app (uid=%d) supercall access denied\\n\", uid);\n"
-              "                return -EPERM;\n"
-              "            }\n"
-              "        }\n"
+              "        ksu_manager_appid = uid % 100000;\n"
+              "        pr_info(\"KernelSU: Registered Manager appid=%d\\n\", ksu_manager_appid);\n"
               "    } else if (uid != 0) {\n"
               "        return -EPERM;\n"
               "    }\n"
@@ -477,7 +421,7 @@ jobs:
           for d_file in get_files("**/supercall/dispatch.c"):
               with open(d_file, "a") as f:
                   f.write(bridge_code)
-                  print(f"[OK] Güvenli Supercall Köprüsü dispatch.c içine eklendi: {d_file}")
+                  print(f"[OK] Süperçağrı Köprüsü dispatch.c içine eklendi: {d_file}")
 
           reboot_c = "kernel/reboot.c"
           if os.path.exists(reboot_c):
