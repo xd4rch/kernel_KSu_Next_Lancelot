@@ -244,7 +244,6 @@ jobs:
               c = c.replace("copy_from_user_nofault", "copy_from_user").replace("copy_to_user_nofault", "copy_to_user").replace("strncpy_from_user_nofault", "strncpy_from_user")
               c = c.replace("<linux/minmax.h>", "<linux/kernel.h>")
               c = re.sub(r'.*filter_count.*', '// [4.14 seccomp]', c)
-              # 4.14 ksys_close -> sys_close köprüsü
               if "ksys_close" in c:
                   c = "#include <linux/syscalls.h>\n" + c.replace("ksys_close", "sys_close")
               if any(k in c for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in c:
@@ -264,7 +263,6 @@ jobs:
               if "void seccomp_filter_release(struct task_struct *tsk) {}" not in c:
                   with open(ap, "a") as f: f.write(seccomp_stub)
 
-          # 4.14 Yerel, Kararlı ve Çökmeyen Sucompat Motoru
           manual_hook_bridge = (
               "\n/* --- 4.14 Native Safe Sucompat Engine --- */\n"
               "#include <linux/fs.h>\n"
@@ -351,13 +349,14 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # Supercall Reboot Köprüsü
+          # Supercall Reboot Köprüsü: arg parametresi kopyalanır ve 0 döndürülür
           bridge_code = (
               "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/anon_inodes.h>\n"
-              "#include <linux/err.h>\n\n"
+              "#include <linux/err.h>\n"
+              "#include <linux/uaccess.h>\n\n"
               "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
@@ -366,8 +365,8 @@ jobs:
               "    .unlocked_ioctl = ksu_reboot_sc_ioctl,\n"
               "    .compat_ioctl = ksu_reboot_sc_ioctl,\n"
               "};\n\n"
-              "int ksu_handle_reboot_supercall(void);\n"
-              "int ksu_handle_reboot_supercall(void) {\n"
+              "int ksu_handle_reboot_supercall(void __user *arg);\n"
+              "int ksu_handle_reboot_supercall(void __user *arg) {\n"
               "    int fd = get_unused_fd_flags(O_CLOEXEC);\n"
               "    struct file *filp;\n"
               "    if (fd < 0) return fd;\n"
@@ -377,6 +376,12 @@ jobs:
               "        return PTR_ERR(filp);\n"
               "    }\n"
               "    fd_install(fd, filp);\n"
+              "    if (arg) {\n"
+              "        if (copy_to_user(arg, &fd, sizeof(fd))) {\n"
+              "            return -EFAULT;\n"
+              "        }\n"
+              "        return 0;\n"
+              "    }\n"
               "    return fd;\n"
               "}\n"
           )
@@ -391,8 +396,8 @@ jobs:
               hook_str = (
                   "\n#if defined(CONFIG_KSU)\n"
                   "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
-                  "        extern int ksu_handle_reboot_supercall(void);\n"
-                  "        return ksu_handle_reboot_supercall();\n"
+                  "        extern int ksu_handle_reboot_supercall(void __user *arg);\n"
+                  "        return ksu_handle_reboot_supercall(arg);\n"
                   "    }\n"
                   "#endif\n"
               )
