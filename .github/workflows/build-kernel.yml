@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat & Secure Cryptographic Bridge
+      - name: Apply SukiSU 4.14 Native Sucompat & Global SELinux Su-Domain Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -252,25 +252,24 @@ jobs:
                   c = "#include <linux/sched/task.h>\n" + c
               if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
                   c = sched_b + c
+
+              # Tüm u:r:ksu:s0 referanslarını LineageOS yerleşik root alanı olan u:r:su:s0 ile değiştir
+              if "u:r:ksu:s0" in c:
+                  c = c.replace("u:r:ksu:s0", "u:r:su:s0")
+                  print(f"[OK] u:r:ksu:s0 -> u:r:su:s0 dönüştürüldü: {cf}")
+
               with open(cf, "w") as f: f.write(c)
 
-          # SELinux u:r:ksu:s0 Domain Fallback (error: -22 Çözümü)
+          # selinux.c içinde alan geçiş hatasını yakala ve süreci u:r:su:s0 alanına bağla
           for sf in get_files("**/selinux/selinux.c"):
               with open(sf, "r") as f: c = f.read()
               c = re.sub(
-                  r'pr_err\([^)]*transive domain failed[^)]*\);\s*return\s+error;',
-                  lambda m: (
-                      'if (!security_secctx_to_secid("u:r:su:s0", 10, &sid) || '
-                      '!security_secctx_to_secid("u:r:kernel:s0", 14, &sid)) {\n'
-                      '        error = 0;\n'
-                      '    } else {\n'
-                      '        error = 0;\n'
-                      '    }'
-                  ),
+                  r'pr_err\([^)]*transive domain failed[^)]*\);\s*return\s+[^;]+;',
+                  'pr_warn("KernelSU: domain fallback to su domain\\n"); error = 0;',
                   c
               )
               with open(sf, "w") as f: f.write(c)
-              print(f"[OK] selinux.c domain fallback uygulandı: {sf}")
+              print(f"[OK] selinux.c alan hatası baypası uygulandı: {sf}")
 
           # perm.c sembol tablosunu eksiksiz tanımla
           perm_code = (
@@ -307,7 +306,7 @@ jobs:
               with open(pf, "w") as f: f.write(perm_code)
               print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {pf}")
 
-          # kernel/seccomp.c içinde SukiSU süperçağrısı için muafiyet (SIGSYS Önleme)
+          # kernel/seccomp.c içinde resmi yönetici ve süperçağrı için seccomp muafiyeti
           seccomp_c = "kernel/seccomp.c"
           if os.path.exists(seccomp_c):
               with open(seccomp_c, "r") as f: sc = f.read()
@@ -334,7 +333,7 @@ jobs:
                       if b_pos != -1:
                           sc = top_includes + sc[:b_pos+1] + hook_sec + sc[b_pos+1:]
                           with open(seccomp_c, "w") as f: f.write(sc)
-                          print("[OK] kernel/seccomp.c içine SukiSU seccomp baypası yerleştirildi!")
+                          print("[OK] kernel/seccomp.c kancası yerleştirildi!")
 
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
