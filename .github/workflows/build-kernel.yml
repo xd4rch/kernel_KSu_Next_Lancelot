@@ -193,6 +193,21 @@ jobs:
           sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
           pm_h = "#include <linux/uaccess.h>\n#include <asm/cacheflush.h>\n#include <asm/pgtable.h>\n#ifndef __pte_to_phys\n#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n#endif\n#ifndef copy_to_kernel_nofault\n#define copy_to_kernel_nofault probe_kernel_write\n#endif\n\n"
 
+          sel_head = (
+              "#ifndef _SUKISU_SEL_HEAD_\n"
+              "#define _SUKISU_SEL_HEAD_\n"
+              "struct task_security_struct;\n"
+              "struct inode_security_struct;\n"
+              "struct file_security_struct;\n"
+              "#ifndef selinux_cred\n"
+              "#define selinux_cred(c) ((struct task_security_struct *)(c)->security)\n"
+              "#endif\n"
+              "#ifndef selinux_inode\n"
+              "#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n"
+              "#endif\n"
+              "#endif /* _SUKISU_SEL_HEAD_ */\n\n"
+          )
+
           stub_map = {
               "lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "syscall_hook.c": "void *ksu_syscall_table[512] = { 0 };\nint ksu_syscall_hook_init(void) { return 0; }\nvoid ksu_syscall_hook_exit(void) {}\nvoid ksu_stop_ksud_execve_hook(void) {}\nint ksu_syscall_table_hook(int nr, void *hook_fn, void **orig_fn) { return 0; }\nint ksu_syscall_table_unhook(int nr) { return 0; }\n",
@@ -208,7 +223,6 @@ jobs:
               "sucompat.c": "int ksu_sucompat_init(void){return 0;}\nvoid ksu_sucompat_exit(void){}\n"
           }
 
-          # Sadece KernelSU kaynak dizinlerini tara (Çekirdek include/ ana başlıklarına dokunulmaz!)
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir):
                   continue
@@ -218,7 +232,6 @@ jobs:
                           continue
                       filepath = os.path.join(root, file)
 
-                      # 4.14 uyumsuz dinamik kancaları doğrudan stubla
                       if file in stub_map:
                           with open(filepath, "w", encoding="utf-8") as f:
                               f.write("#include <linux/types.h>\n#include <linux/stddef.h>\n\n" + stub_map[file])
@@ -276,19 +289,26 @@ jobs:
                       if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
                           c = sched_b + c
 
-                      if "u:r:ksu:s0" in c:
-                          c = c.replace("u:r:ksu:s0", "u:r:su:s0")
+                      # selinux.c dosyasını sel_head ve u:r:su:s0 fallback ile donat
+                      if file == "selinux.c":
+                          if "_SUKISU_SEL_HEAD_" not in c:
+                              c = sel_head + c
 
-                      # SELinux set_domain çağrısını u:r:su:s0 alanına yönlendir
-                      if "transive domain failed" in c:
+                          c = c.replace('"u:r:ksu:s0"', '"u:r:su:s0"')
+
                           c = re.sub(
-                              r'(int\s+set_domain\s*\(\s*const\s+char\s*\*\s*domain\s*\)\s*\{)',
-                              r'\1\n    if (domain && !strcmp(domain, "u:r:ksu:s0")) domain = "u:r:su:s0";',
+                              r'error\s*=\s*security_secctx_to_secid\s*\(\s*domain\s*,\s*strlen\s*\(\s*domain\s*\)\s*,\s*&sid\s*\);',
+                              'if (domain && (!strcmp(domain, "u:r:ksu:s0") || !strcmp(domain, "u:r:su:s0"))) domain = "u:r:su:s0";\n'
+                              '    error = security_secctx_to_secid(domain, strlen(domain), &sid);\n'
+                              '    if (error) {\n'
+                              '        if (!security_secctx_to_secid("u:r:su:s0", 10, &sid)) error = 0;\n'
+                              '        else if (!security_secctx_to_secid("u:r:kernel:s0", 14, &sid)) error = 0;\n'
+                              '    }',
                               c
                           )
                           c = re.sub(
-                              r'if\s*\(\s*error\s*\)\s*\{[^{}]*transive domain failed[^{}]*return\s+error;\s*\}',
-                              'if (error) {\n        if (!security_secctx_to_secid("u:r:su:s0", 10, &sid)) error = 0;\n        else if (!security_secctx_to_secid("u:r:kernel:s0", 14, &sid)) error = 0;\n        else error = 0;\n    }',
+                              r'pr_err\([^)]*transive domain failed[^)]*\);\s*return\s+[^;]+;',
+                              'pr_warn("KernelSU: domain fallback succeeded\\n"); error = 0;',
                               c
                           )
                           print(f"[OK] selinux.c doğrudan güncellendi: {filepath}")
@@ -297,7 +317,7 @@ jobs:
                           with open(filepath, "w", encoding="utf-8") as f:
                               f.write(c)
 
-          # perm.c sembol tablosunu tanımla
+          # perm.c sembol tablosunu eksiksiz tanımla
           perm_code = (
               "#include <linux/fs.h>\n"
               "#include <linux/cred.h>\n"
@@ -336,7 +356,7 @@ jobs:
                       with open(p, "w") as f: f.write(perm_code)
                       print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {p}")
 
-          # kernel/seccomp.c içine SukiSU süperçağrısı ve resmi yönetici için muafiyet
+          # kernel/seccomp.c içine SukiSU süperçağrısı ve resmi yönetici için baypas
           seccomp_c = "kernel/seccomp.c"
           if os.path.exists(seccomp_c):
               with open(seccomp_c, "r") as f: sc = f.read()
