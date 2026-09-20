@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat & Zero-Trust Supercall Bridge
+      - name: Apply SukiSU 4.14 Native Sucompat & Secure Seccomp Supercall Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -254,23 +254,55 @@ jobs:
                   c = sched_b + c
               with open(cf, "w") as f: f.write(c)
 
-          # perm.c: Yalnızca root ve kriptografik olarak doğrulanmış ksu_manager_appid yetkilendirilir
-          for pf in get_files("**/supercall/perm.c"):
-              with open(pf, "r") as f: c = f.read()
-              if "ksu_supercall_check_perm" in c:
-                  c = (
-                      "#include <linux/cred.h>\n"
-                      "extern unsigned int ksu_manager_appid;\n"
-                      "bool ksu_supercall_check_perm(struct file *filp, unsigned int cmd) {\n"
-                      "    uid_t uid = current_uid().val;\n"
-                      "    if (uid == 0) return true;\n"
-                      "    if (ksu_manager_appid != 0 && (uid % 100000) == ksu_manager_appid) return true;\n"
-                      "    pr_err(\"KernelSU: unauthorized ioctl cmd=0x%x by uid=%d\\n\", cmd, uid);\n"
-                      "    return false;\n"
-                      "}\n"
+          # manager.h ve manager.c içindeki ksu_is_manager fonksiyonuna kök yetkisi ekle
+          for mf in get_files("**/manager.h") | get_files("**/manager.c"):
+              with open(mf, "r") as f: c = f.read()
+              if "static inline bool ksu_is_manager(" in c or "bool ksu_is_manager(" in c:
+                  c = re.sub(
+                      r'(bool\s+ksu_is_manager\s*\([^)]*\)\s*\{)',
+                      r'\1\n    if (current_uid().val == 0) return true;\n    if (ksu_manager_appid != 0 && (current_uid().val % 100000) == ksu_manager_appid) return true;',
+                      c
                   )
-                  with open(pf, "w") as f: f.write(c)
-                  print(f"[OK] perm.c güvenli izin mimarisi kuruldu: {pf}")
+                  with open(mf, "w") as f: f.write(c)
+                  print(f"[OK] manager başlığı güncellendi: {mf}")
+
+          # perm.c dosyasını root ve meşru yönetici için yetkilendir
+          for pf in get_files("**/supercall/perm.c"):
+              code = (
+                  "#include <linux/cred.h>\n"
+                  "#include <linux/fs.h>\n"
+                  "extern unsigned int ksu_manager_appid;\n"
+                  "extern bool ksu_is_manager(void);\n\n"
+                  "bool ksu_supercall_check_perm(struct file *filp, unsigned int cmd) {\n"
+                  "    uid_t uid = current_uid().val;\n"
+                  "    if (uid == 0) return true;\n"
+                  "    if (ksu_manager_appid != 0 && (uid % 100000) == ksu_manager_appid) return true;\n"
+                  "    return ksu_is_manager();\n"
+                  "}\n"
+              )
+              with open(pf, "w") as f: f.write(code)
+              print(f"[OK] perm.c yeniden yazıldı: {pf}")
+
+          # Seccomp Kalkanını Resmi Yönetici İçin Serbest Bırak (SIGSYS Çözümü)
+          seccomp_c = "kernel/seccomp.c"
+          if os.path.exists(seccomp_c):
+              with open(seccomp_c, "r") as f: sc = f.read()
+              if "ksu_manager_appid" not in sc:
+                  hook_sec = (
+                      "\n#if defined(CONFIG_KSU)\n"
+                      "    extern unsigned int ksu_manager_appid;\n"
+                      "    if (ksu_manager_appid != 0 && (current_uid().val % 100000) == ksu_manager_appid) {\n"
+                      "        return 0; /* Meşru SukiSU Manager seccomp kısıtlamasına takılamaz */\n"
+                      "    }\n"
+                      "#endif\n"
+                  )
+                  pos = sc.find("__secure_computing(")
+                  if pos != -1:
+                      b_pos = sc.find("{", pos)
+                      if b_pos != -1:
+                          sc = sc[:b_pos+1] + hook_sec + sc[b_pos+1:]
+                          with open(seccomp_c, "w") as f: f.write(sc)
+                          print("[OK] kernel/seccomp.c içine SukiSU muafiyeti eklendi!")
 
           seccomp_stub = (
               "\n/* [4.14 seccomp bridge] */\n"
@@ -375,7 +407,7 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # Kriptografik Doğrulamalı Sıfır-Zafiyet Supercall Köprüsü
+          # Kriptografik İmza Teyitli Sıfır-Taviz Supercall Köprüsü
           bridge_code = (
               "\n/* --- SukiSU Zero-Trust Cryptographic Supercall Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
@@ -482,7 +514,7 @@ jobs:
           for d_file in get_files("**/supercall/dispatch.c"):
               with open(d_file, "a") as f:
                   f.write(bridge_code)
-                  print(f"[OK] Güvenli Supercall Köprüsü dispatch.c içine eklendi: {d_file}")
+                  print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {d_file}")
 
           reboot_c = "kernel/reboot.c"
           if os.path.exists(reboot_c):
