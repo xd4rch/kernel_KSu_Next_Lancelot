@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat & Deep SELinux Su-Domain Bridge
+      - name: Apply SukiSU 4.14 Native Sucompat & Clean SELinux Bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -193,100 +193,90 @@ jobs:
           sched_b = "#include <linux/sched.h>\n#include <linux/sched/task.h>\n#include <linux/sched/signal.h>\n#include <linux/init_task.h>\nextern rwlock_t tasklist_lock;\nextern struct task_struct init_task;\n\n"
           pm_h = "#include <linux/uaccess.h>\n#include <asm/cacheflush.h>\n#include <asm/pgtable.h>\n#ifndef __pte_to_phys\n#define __pte_to_phys(pte) ((phys_addr_t)pte_pfn(pte) << PAGE_SHIFT)\n#endif\n#ifndef copy_to_kernel_nofault\n#define copy_to_kernel_nofault probe_kernel_write\n#endif\n\n"
 
-          # Tüm kaynak ağacını sembolik bağları takip ederek gez
-          for root, dirs, files in os.walk(".", followlinks=True):
-              for file in files:
-                  if not (file.endswith(".c") or file.endswith(".h")):
-                      continue
-                  filepath = os.path.join(root, file)
-                  try:
-                      with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                          c = f.read()
-                  except Exception:
-                      continue
+          # Yalnızca KernelSU kaynak dizinlerini tara (Çekirdek ana başlıklarına asla dokunulmaz!)
+          for kdir in ["drivers/kernelsu", "KernelSU"]:
+              if not os.path.exists(kdir):
+                  continue
+              for root, dirs, files in os.walk(kdir, followlinks=True):
+                  for file in files:
+                      if not (file.endswith(".c") or file.endswith(".h")):
+                          continue
+                      filepath = os.path.join(root, file)
+                      try:
+                          with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                              c = f.read()
+                      except Exception:
+                          continue
 
-                  orig_c = c
+                      orig_c = c
 
-                  # Syscall hook başlıkları
-                  if file in ["syscall_hook.h", "syscall.h"] and "_SUKISU_SYSCALL_FN_T_" not in c:
-                      c = fn_t + c
+                      if file in ["syscall_hook.h", "syscall.h"] and "_SUKISU_SYSCALL_FN_T_" not in c:
+                          c = fn_t + c
 
-                  # Init modülü
-                  if file == "init.c" and ("MODULE_IMPORT_NS" not in c or "#define MODULE_IMPORT_NS" not in c):
-                      c = "#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n\n" + c
+                      if file == "init.c" and ("MODULE_IMPORT_NS" not in c or "#define MODULE_IMPORT_NS" not in c):
+                          c = "#ifndef MODULE_IMPORT_NS\n#define MODULE_IMPORT_NS(ns)\n#endif\n\n" + c
 
-                  # Patch memory
-                  if file == "patch_memory.c":
-                      c = c.replace("__flush_icache_range", "flush_icache_range").replace("copy_to_kernel_nofault", "probe_kernel_write")
-                      if "#ifndef copy_to_kernel_nofault" not in c:
-                          c = pm_h + c
+                      if file == "patch_memory.c":
+                          c = c.replace("__flush_icache_range", "flush_icache_range").replace("copy_to_kernel_nofault", "probe_kernel_write")
+                          if "#ifndef copy_to_kernel_nofault" not in c:
+                              c = pm_h + c
 
-                  # File wrapper
-                  if file == "file_wrapper.c" and "_SUKISU_FILE_WRAPPER_4_14_" not in c:
-                      lines = c.splitlines(keepends=True)
-                      out, skip = [], False
-                      for l in lines:
-                          if any(x in l for x in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]): out.append("// " + l)
-                          elif any(x in l for x in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]): skip = True
-                          elif skip:
-                              if l.startswith("}"): skip = False
-                          else: out.append(l)
-                      c = fw_h + "".join(out)
+                      if file == "file_wrapper.c" and "_SUKISU_FILE_WRAPPER_4_14_" not in c:
+                          lines = c.splitlines(keepends=True)
+                          out, skip = [], False
+                          for l in lines:
+                              if any(x in l for x in ["->ops.iopoll", "->ops.mmap_supported_flags", "->ops.remap_file_range", "->ops.fadvise"]): out.append("// " + l)
+                              elif any(x in l for x in ["ksu_wrapper_iopoll(", "ksu_wrapper_remap_file_range(", "ksu_wrapper_fadvise("]): skip = True
+                              elif skip:
+                                  if l.startswith("}"): skip = False
+                              else: out.append(l)
+                          c = fw_h + "".join(out)
 
-                  # Event queue & seccomp cache
-                  if file.startswith("event_queue") and "_SUKISU_EQ_FIX_" not in c:
-                      c = "#ifndef _SUKISU_EQ_FIX_\n#define _SUKISU_EQ_FIX_\n#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\ntypedef unsigned int __poll_t;\n#ifndef EPOLLIN\n#define EPOLLIN 0x00000001\n#endif\n#ifndef EPOLLHUP\n#define EPOLLHUP 0x00000010\n#endif\n#ifndef EPOLLRDNORM\n#define EPOLLRDNORM 0x00000040\n#endif\n#endif\n\n" + c
-                  if file.startswith("seccomp_cache") and "SECCOMP_ARCH_NATIVE_NR" not in c:
-                      c = "#include <asm/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#endif\n" + c
+                      if file.startswith("event_queue") and "_SUKISU_EQ_FIX_" not in c:
+                          c = "#ifndef _SUKISU_EQ_FIX_\n#define _SUKISU_EQ_FIX_\n#include <linux/poll.h>\n#include <uapi/linux/eventpoll.h>\ntypedef unsigned int __poll_t;\n#ifndef EPOLLIN\n#define EPOLLIN 0x00000001\n#endif\n#ifndef EPOLLHUP\n#define EPOLLHUP 0x00000010\n#endif\n#ifndef EPOLLRDNORM\n#define EPOLLRDNORM 0x00000040\n#endif\n#endif\n\n" + c
 
-                  # Genel 4.14 uyumluluk düzeltmeleri
-                  if "copy_from_user_nofault" in c or "copy_to_user_nofault" in c or "strncpy_from_user_nofault" in c:
-                      c = c.replace("copy_from_user_nofault", "copy_from_user").replace("copy_to_user_nofault", "copy_to_user").replace("strncpy_from_user_nofault", "strncpy_from_user")
-                  if "<linux/minmax.h>" in c:
-                      c = c.replace("<linux/minmax.h>", "<linux/kernel.h>")
-                  if "filter_count" in c:
-                      c = re.sub(r'.*filter_count.*', '// [4.14 seccomp]', c)
-                  if "ksys_close" in c:
-                      c = "#include <linux/syscalls.h>\n" + c.replace("ksys_close", "sys_close")
-                  if any(k in c for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in c:
-                      c = "#include <linux/uaccess.h>\n" + c
-                  if "put_task_struct" in c and "<linux/sched/task.h>" not in c:
-                      c = "#include <linux/sched/task.h>\n" + c
-                  if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
-                      c = sched_b + c
+                      if file.startswith("seccomp_cache") and "SECCOMP_ARCH_NATIVE_NR" not in c:
+                          c = "#include <asm/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#endif\n" + c
 
-                  # u:r:ksu:s0 referanslarını u:r:su:s0 ile değiştir
-                  if "u:r:ksu:s0" in c:
-                      c = c.replace("u:r:ksu:s0", "u:r:su:s0")
-                      print(f"[OK] u:r:ksu:s0 -> u:r:su:s0: {filepath}")
+                      if "copy_from_user_nofault" in c or "copy_to_user_nofault" in c or "strncpy_from_user_nofault" in c:
+                          c = c.replace("copy_from_user_nofault", "copy_from_user").replace("copy_to_user_nofault", "copy_to_user").replace("strncpy_from_user_nofault", "strncpy_from_user")
+                      if "<linux/minmax.h>" in c:
+                          c = c.replace("<linux/minmax.h>", "<linux/kernel.h>")
+                      if "filter_count" in c:
+                          c = re.sub(r'.*filter_count.*', '// [4.14 seccomp]', c)
+                      if "ksys_close" in c:
+                          c = "#include <linux/syscalls.h>\n" + c.replace("ksys_close", "sys_close")
+                      if any(k in c for k in ["strncpy_from_user", "copy_from_user", "copy_to_user"]) and "<linux/uaccess.h>" not in c:
+                          c = "#include <linux/uaccess.h>\n" + c
+                      if "put_task_struct" in c and "<linux/sched/task.h>" not in c:
+                          c = "#include <linux/sched/task.h>\n" + c
+                      if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
+                          c = sched_b + c
 
-                  # SELinux set_domain fonksiyonunu u:r:su:s0 alanına yönlendir
-                  if "transive domain failed" in c:
-                      target = "error = security_secctx_to_secid(domain, strlen(domain), &sid);"
-                      replacement = (
-                          'if (domain && (!strcmp(domain, "u:r:ksu:s0") || !strcmp(domain, "u:r:su:s0"))) domain = "u:r:su:s0";\n'
-                          '    error = security_secctx_to_secid(domain, strlen(domain), &sid);\n'
-                          '    if (error) {\n'
-                          '        if (!security_secctx_to_secid("u:r:su:s0", 10, &sid)) error = 0;\n'
-                          '        else if (!security_secctx_to_secid("u:r:kernel:s0", 14, &sid)) error = 0;\n'
-                          '    }'
-                      )
-                      if target in c:
-                          c = c.replace(target, replacement)
-                          print(f"[OK] security_secctx_to_secid doğrudan yamalandı: {filepath}")
+                      if "u:r:ksu:s0" in c:
+                          c = c.replace("u:r:ksu:s0", "u:r:su:s0")
 
-                      c = re.sub(
-                          r'pr_err\([^)]*transive domain failed[^)]*\);\s*return\s+[^;]+;',
-                          'pr_warn("KernelSU: domain fallback to su domain succeeded\\n"); error = 0;',
-                          c
-                      )
-                      print(f"[OK] transive domain failed hatası kaldırıldı: {filepath}")
+                      # SELinux set_domain alan yönlendirmesi
+                      if "security_secctx_to_secid" in c and "transive domain failed" in c:
+                          c = re.sub(
+                              r'error\s*=\s*security_secctx_to_secid\s*\([^;]+;',
+                              'if (domain && (!strcmp(domain, "u:r:ksu:s0") || !strcmp(domain, "u:r:su:s0"))) domain = "u:r:su:s0";\n'
+                              '    error = security_secctx_to_secid(domain, strlen(domain), &sid);\n'
+                              '    if (error) { if (!security_secctx_to_secid("u:r:su:s0", 10, &sid)) error = 0; }',
+                              c
+                          )
+                          c = re.sub(
+                              r'pr_err\([^)]*transive domain failed[^)]*\);\s*return\s+[^;]+;',
+                              'pr_warn("KernelSU: domain fallback succeeded\\n"); error = 0;',
+                              c
+                          )
+                          print(f"[OK] selinux.c doğrudan güncellendi: {filepath}")
 
-                  if c != orig_c:
-                      with open(filepath, "w", encoding="utf-8") as f:
-                          f.write(c)
+                      if c != orig_c:
+                          with open(filepath, "w", encoding="utf-8") as f:
+                              f.write(c)
 
-          # perm.c sembol tablosunu tanımla
+          # perm.c sembol tablosunu eksiksiz tanımla
           perm_code = (
               "#include <linux/fs.h>\n"
               "#include <linux/cred.h>\n"
@@ -317,13 +307,15 @@ jobs:
               "    return manager_or_root(filp, cmd);\n"
               "}\n"
           )
-          for root, dirs, files in os.walk(".", followlinks=True):
-              if "perm.c" in files:
-                  p = os.path.join(root, "perm.c")
-                  with open(p, "w") as f: f.write(perm_code)
-                  print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {p}")
+          for kdir in ["drivers/kernelsu", "KernelSU"]:
+              if not os.path.exists(kdir): continue
+              for root, dirs, files in os.walk(kdir, followlinks=True):
+                  if "perm.c" in files:
+                      p = os.path.join(root, "perm.c")
+                      with open(p, "w") as f: f.write(perm_code)
+                      print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {p}")
 
-          # kernel/seccomp.c içine SukiSU süperçağrısı ve resmi yönetici için baypas
+          # kernel/seccomp.c içine SukiSU süperçağrısı ve resmi yönetici için muafiyet
           seccomp_c = "kernel/seccomp.c"
           if os.path.exists(seccomp_c):
               with open(seccomp_c, "r") as f: sc = f.read()
@@ -353,12 +345,14 @@ jobs:
                           print("[OK] kernel/seccomp.c içine SukiSU seccomp baypası yerleştirildi!")
 
           # app_profile seccomp stub
-          for root, dirs, files in os.walk(".", followlinks=True):
-              if "app_profile.c" in files:
-                  p = os.path.join(root, "app_profile.c")
-                  with open(p, "r") as f: ap_c = f.read()
-                  if "void seccomp_filter_release(struct task_struct *tsk) {}" not in ap_c:
-                      with open(p, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
+          for kdir in ["drivers/kernelsu", "KernelSU"]:
+              if not os.path.exists(kdir): continue
+              for root, dirs, files in os.walk(kdir, followlinks=True):
+                  if "app_profile.c" in files:
+                      p = os.path.join(root, "app_profile.c")
+                      with open(p, "r") as f: ap_c = f.read()
+                      if "void seccomp_filter_release(struct task_struct *tsk) {}" not in ap_c:
+                          with open(p, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
 
           # 4.14 Yerel Sucompat Motoru
           manual_hook_bridge = (
@@ -414,13 +408,15 @@ jobs:
               "    return 0;\n"
               "}\n"
           )
-          for root, dirs, files in os.walk(".", followlinks=True):
-              if "ksud_integration.c" in files:
-                  p = os.path.join(root, "ksud_integration.c")
-                  with open(p, "r") as f: kc = f.read()
-                  if "ksu_handle_execveat(" not in kc:
-                      with open(p, "a") as f: f.write(manual_hook_bridge)
-                      print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {p}")
+          for kdir in ["drivers/kernelsu", "KernelSU"]:
+              if not os.path.exists(kdir): continue
+              for root, dirs, files in os.walk(kdir, followlinks=True):
+                  if "ksud_integration.c" in files:
+                      p = os.path.join(root, "ksud_integration.c")
+                      with open(p, "r") as f: kc = f.read()
+                      if "ksu_handle_execveat(" not in kc:
+                          with open(p, "a") as f: f.write(manual_hook_bridge)
+                          print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {p}")
 
           # Kriptografik İmza Teyitli Sıfır-Taviz Supercall Köprüsü
           bridge_code = (
@@ -526,11 +522,13 @@ jobs:
               "    return fd;\n"
               "}\n"
           )
-          for root, dirs, files in os.walk(".", followlinks=True):
-              if "dispatch.c" in files:
-                  p = os.path.join(root, "dispatch.c")
-                  with open(p, "a") as f: f.write(bridge_code)
-                  print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {p}")
+          for kdir in ["drivers/kernelsu", "KernelSU"]:
+              if not os.path.exists(kdir): continue
+              for root, dirs, files in os.walk(kdir, followlinks=True):
+                  if "dispatch.c" in files:
+                      p = os.path.join(root, "dispatch.c")
+                      with open(p, "a") as f: f.write(bridge_code)
+                      print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {p}")
 
           reboot_c = "kernel/reboot.c"
           if os.path.exists(reboot_c):
