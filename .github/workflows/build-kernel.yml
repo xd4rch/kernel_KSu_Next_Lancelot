@@ -252,6 +252,17 @@ jobs:
                   c = "#include <linux/sched/task.h>\n" + c
               if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
                   c = sched_b + c
+
+              # ksu_is_manager fonksiyonunun root (uid=0) süreçleri kabul etmesini sağla
+              if "bool ksu_is_manager(" in c:
+                  c = c.replace("bool ksu_is_manager(void)\n{", "bool ksu_is_manager(void)\n{\n    if (current_uid().val == 0) return true;")
+                  c = c.replace("bool ksu_is_manager(void) {", "bool ksu_is_manager(void) {\n    if (current_uid().val == 0) return true;")
+
+              # Supercall ioctl izin bloğunu baypas et (fd sahibi zaten parolayla doğrulandı)
+              if "permission denied for cmd" in c:
+                  c = re.sub(r'pr_err\([^)]*permission denied for cmd[^)]*\);\s*return\s+-EPERM;',
+                             'pr_info("KernelSU: bypassing supercall perm check for cmd=0x%x uid=%d\\n", cmd, current_uid().val);', c)
+
               with open(cf, "w") as f: f.write(c)
 
           seccomp_stub = (
@@ -349,7 +360,7 @@ jobs:
                   with open(target, "w") as f: f.write(stub_header + code)
                   print(f"[OK] Stub uygulandı: {target}")
 
-          # Supercall Reboot Köprüsü: arg parametresi kopyalanır ve 0 döndürülür
+          # Supercall Reboot Köprüsü: Yönetici UID'sini otomatik kaydeder
           bridge_code = (
               "\n/* --- SukiSU Supercall Direct Reboot Bridge --- */\n"
               "#include <linux/fs.h>\n"
@@ -357,7 +368,12 @@ jobs:
               "#include <linux/anon_inodes.h>\n"
               "#include <linux/err.h>\n"
               "#include <linux/uaccess.h>\n\n"
+              "extern unsigned int ksu_manager_appid;\n\n"
               "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
+              "    uid_t uid = current_uid().val;\n"
+              "    if (uid >= 10000 && ksu_manager_appid == 0) {\n"
+              "        ksu_manager_appid = uid % 100000;\n"
+              "    }\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
               "static const struct file_operations ksu_reboot_sc_fops = {\n"
@@ -369,6 +385,10 @@ jobs:
               "int ksu_handle_reboot_supercall(void __user *arg) {\n"
               "    int fd = get_unused_fd_flags(O_CLOEXEC);\n"
               "    struct file *filp;\n"
+              "    uid_t uid = current_uid().val;\n"
+              "    if (uid >= 10000) {\n"
+              "        ksu_manager_appid = uid % 100000;\n"
+              "    }\n"
               "    if (fd < 0) return fd;\n"
               "    filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_reboot_sc_fops, NULL, O_RDWR);\n"
               "    if (IS_ERR(filp)) {\n"
