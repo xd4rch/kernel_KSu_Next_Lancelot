@@ -223,6 +223,8 @@ jobs:
               "sucompat.c": "int ksu_sucompat_init(void){return 0;}\nvoid ksu_sucompat_exit(void){}\n"
           }
 
+          visited_files = set()
+
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir):
                   continue
@@ -231,15 +233,19 @@ jobs:
                       if not (file.endswith(".c") or file.endswith(".h")):
                           continue
                       filepath = os.path.join(root, file)
+                      real_p = os.path.realpath(filepath)
+                      if real_p in visited_files:
+                          continue
+                      visited_files.add(real_p)
 
                       if file in stub_map:
-                          with open(filepath, "w", encoding="utf-8") as f:
+                          with open(real_p, "w", encoding="utf-8") as f:
                               f.write("#include <linux/types.h>\n#include <linux/stddef.h>\n\n" + stub_map[file])
-                          print(f"[OK] Stub uygulandı: {filepath}")
+                          print(f"[OK] Stub uygulandı: {real_p}")
                           continue
 
                       try:
-                          with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                          with open(real_p, "r", encoding="utf-8", errors="ignore") as f:
                               c = f.read()
                       except Exception:
                           continue
@@ -289,7 +295,6 @@ jobs:
                       if ("tasklist_lock" in c or "init_task" in c) and "extern rwlock_t tasklist_lock" not in c:
                           c = sched_b + c
 
-                      # selinux.c dosyasını sel_head ve u:r:su:s0 fallback ile donat
                       if file == "selinux.c":
                           if "_SUKISU_SEL_HEAD_" not in c:
                               c = sel_head + c
@@ -311,10 +316,10 @@ jobs:
                               'pr_warn("KernelSU: domain fallback succeeded\\n"); error = 0;',
                               c
                           )
-                          print(f"[OK] selinux.c doğrudan güncellendi: {filepath}")
+                          print(f"[OK] selinux.c doğrudan güncellendi: {real_p}")
 
                       if c != orig_c:
-                          with open(filepath, "w", encoding="utf-8") as f:
+                          with open(real_p, "w", encoding="utf-8") as f:
                               f.write(c)
 
           # perm.c sembol tablosunu eksiksiz tanımla
@@ -348,13 +353,16 @@ jobs:
               "    return manager_or_root(filp, cmd);\n"
               "}\n"
           )
+          perm_done = set()
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir): continue
               for root, dirs, files in os.walk(kdir, followlinks=True):
                   if "perm.c" in files:
-                      p = os.path.join(root, "perm.c")
-                      with open(p, "w") as f: f.write(perm_code)
-                      print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {p}")
+                      rp = os.path.realpath(os.path.join(root, "perm.c"))
+                      if rp not in perm_done:
+                          with open(rp, "w") as f: f.write(perm_code)
+                          perm_done.add(rp)
+                          print(f"[OK] perm.c sembol tablosu eksiksiz kuruldu: {rp}")
 
           # kernel/seccomp.c içine SukiSU süperçağrısı ve resmi yönetici için baypas
           seccomp_c = "kernel/seccomp.c"
@@ -386,14 +394,17 @@ jobs:
                           print("[OK] kernel/seccomp.c içine SukiSU seccomp baypası yerleştirildi!")
 
           # app_profile seccomp stub
+          app_done = set()
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir): continue
               for root, dirs, files in os.walk(kdir, followlinks=True):
                   if "app_profile.c" in files:
-                      p = os.path.join(root, "app_profile.c")
-                      with open(p, "r") as f: ap_c = f.read()
-                      if "void seccomp_filter_release(struct task_struct *tsk) {}" not in ap_c:
-                          with open(p, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
+                      rp = os.path.realpath(os.path.join(root, "app_profile.c"))
+                      if rp not in app_done:
+                          with open(rp, "r") as f: ap_c = f.read()
+                          if "void seccomp_filter_release(struct task_struct *tsk) {}" not in ap_c:
+                              with open(rp, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
+                          app_done.add(rp)
 
           # 4.14 Yerel Sucompat Motoru
           manual_hook_bridge = (
@@ -449,15 +460,18 @@ jobs:
               "    return 0;\n"
               "}\n"
           )
+          ksud_done = set()
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir): continue
               for root, dirs, files in os.walk(kdir, followlinks=True):
                   if "ksud_integration.c" in files:
-                      p = os.path.join(root, "ksud_integration.c")
-                      with open(p, "r") as f: kc = f.read()
-                      if "ksu_handle_execveat(" not in kc:
-                          with open(p, "a") as f: f.write(manual_hook_bridge)
-                          print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {p}")
+                      rp = os.path.realpath(os.path.join(root, "ksud_integration.c"))
+                      if rp not in ksud_done:
+                          with open(rp, "r") as f: kc = f.read()
+                          if "ksu_handle_execveat(" not in kc:
+                              with open(rp, "a") as f: f.write(manual_hook_bridge)
+                              print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {rp}")
+                          ksud_done.add(rp)
 
           # Kriptografik İmza Teyitli Sıfır-Taviz Supercall Köprüsü
           bridge_code = (
@@ -563,13 +577,18 @@ jobs:
               "    return fd;\n"
               "}\n"
           )
+          disp_done = set()
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir): continue
               for root, dirs, files in os.walk(kdir, followlinks=True):
                   if "dispatch.c" in files:
-                      p = os.path.join(root, "dispatch.c")
-                      with open(p, "a") as f: f.write(bridge_code)
-                      print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {p}")
+                      rp = os.path.realpath(os.path.join(root, "dispatch.c"))
+                      if rp not in disp_done:
+                          with open(rp, "r") as f: dc = f.read()
+                          if "ksu_handle_reboot_supercall" not in dc:
+                              with open(rp, "a") as f: f.write(bridge_code)
+                              print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {rp}")
+                          disp_done.add(rp)
 
           reboot_c = "kernel/reboot.c"
           if os.path.exists(reboot_c):
