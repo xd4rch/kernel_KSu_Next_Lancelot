@@ -161,7 +161,7 @@ jobs:
           EOF
           python3 patch_core_headers.py
 
-      - name: Apply SukiSU 4.14 Native Sucompat, Prctl Hook & Manager Bypass
+      - name: Apply SukiSU 4.14 Native Sucompat, Supercall FD & Manager Bypass
         shell: bash
         run: |
           set -euo pipefail
@@ -415,55 +415,6 @@ jobs:
                           with open(avc_c, "w") as f: f.write(ac)
                           print("[OK] security/selinux/avc.c muafiyeti uygulandı!")
 
-          # --- kernel/sys.c içine doğrudan prctl(0xdeadbeef) standart uyumlu kanca ---
-          sys_c = "kernel/sys.c"
-          if os.path.exists(sys_c):
-              with open(sys_c, "r") as f: syc = f.read()
-              if "ksu_handle_prctl_bridge" not in syc:
-                  prctl_hook = (
-                      "\n#if defined(CONFIG_KSU)\n"
-                      "    /* [ksu_handle_prctl_bridge] */\n"
-                      "    if (option == 0xdeadbeef) {\n"
-                      "        extern unsigned int ksu_manager_appid;\n"
-                      "        uid_t caller_uid = current_uid().val;\n"
-                      "        int ksu_ver = 40939;\n"
-                      "        if (caller_uid >= 10000) {\n"
-                      "            ksu_manager_appid = caller_uid % 100000;\n"
-                      "        }\n"
-                      "        /* Standart KernelSU protokolü: arg2 = CMD (1 = GET_VERSION), arg3 = &version */\n"
-                      "        if (arg3 && access_ok(VERIFY_WRITE, (void __user *)arg3, sizeof(ksu_ver))) {\n"
-                      "            copy_to_user((void __user *)arg3, &ksu_ver, sizeof(ksu_ver));\n"
-                      "            return 0;\n"
-                      "        }\n"
-                      "        /* Alternatif doğrudan işaretçi: prctl(0xdeadbeef, &version) */\n"
-                      "        if (arg2 > 0x10000 && access_ok(VERIFY_WRITE, (void __user *)arg2, sizeof(ksu_ver))) {\n"
-                      "            copy_to_user((void __user *)arg2, &ksu_ver, sizeof(ksu_ver));\n"
-                      "            return 0;\n"
-                      "        }\n"
-                      "        /* Doğrudan root yükseltme komutu: CMD == 2 */\n"
-                      "        if (arg2 == 2) {\n"
-                      "            struct cred *new_cred = prepare_creds();\n"
-                      "            if (new_cred) {\n"
-                      "                new_cred->uid.val = new_cred->gid.val = 0;\n"
-                      "                new_cred->euid.val = new_cred->egid.val = 0;\n"
-                      "                new_cred->suid.val = new_cred->sgid.val = 0;\n"
-                      "                new_cred->fsuid.val = new_cred->fsgid.val = 0;\n"
-                      "                commit_creds(new_cred);\n"
-                      "            }\n"
-                      "            return 0;\n"
-                      "        }\n"
-                      "        return 0;\n"
-                      "    }\n"
-                      "#endif\n"
-                  )
-                  p = syc.find("SYSCALL_DEFINE5(prctl")
-                  if p != -1:
-                      b = syc.find("{", p)
-                      if b != -1:
-                          syc = "#include <linux/uaccess.h>\n#include <linux/cred.h>\n" + syc[:b+1] + prctl_hook + syc[b+1:]
-                          with open(sys_c, "w") as f: f.write(syc)
-                          print("[OK] kernel/sys.c içine prctl(0xdeadbeef) kancası yerleştirildi!")
-
           # app_profile seccomp stub
           app_done = set()
           for kdir in ["drivers/kernelsu", "KernelSU"]:
@@ -501,7 +452,7 @@ jobs:
               "        const char *name = (*filename_ptr)->name;\n"
               "        ksu_handle_execveat_ksud(name, (struct user_arg_ptr *)argv);\n"
               "        if (current->mm && !uaccess_kernel()) {\n"
-              "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0 || strcmp(name, \"su\") == 0) {\n"
+              "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0) {\n"
               "                struct filename *su_name = getname_kernel(\"/data/adb/ksu/bin/su\");\n"
               "                if (!IS_ERR(su_name)) {\n"
               "                    putname(*filename_ptr);\n"
@@ -544,108 +495,48 @@ jobs:
                               print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {rp}")
                           ksud_done.add(rp)
 
-          # Kriptografik İmza Teyitli Sıfır-Taviz Supercall Köprüsü
+          # Gerçek Supercall Dosya Tanıtıcısı Motoru (dispatch.c)
           bridge_code = (
-              "\n/* --- SukiSU Zero-Trust Cryptographic Supercall Reboot Bridge --- */\n"
+              "\n/* --- SukiSU Native Supercall FD Dispatch Bridge --- */\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/anon_inodes.h>\n"
               "#include <linux/err.h>\n"
               "#include <linux/uaccess.h>\n"
-              "#include <linux/mm.h>\n"
-              "#include <linux/sched/mm.h>\n"
-              "#include <linux/dcache.h>\n"
-              "#include <linux/gfp.h>\n"
-              "#include <linux/cred.h>\n\n"
-              "extern bool is_manager_apk(char *path);\n"
+              "#include <linux/cred.h>\n"
+              "#include <linux/sched.h>\n\n"
               "extern unsigned int ksu_manager_appid;\n\n"
-              "static bool ksu_verify_caller_signature(uid_t uid) {\n"
-              "    struct mm_struct *mm = current->mm;\n"
-              "    struct vm_area_struct *vma;\n"
-              "    char *page_buf;\n"
-              "    char apk_path[512];\n"
-              "    bool verified = false;\n"
-              "    if (!mm) return false;\n"
-              "    page_buf = (char *)__get_free_page(GFP_KERNEL);\n"
-              "    if (!page_buf) return false;\n"
-              "    down_read(&mm->mmap_sem);\n"
-              "    for (vma = mm->mmap; vma; vma = vma->vm_next) {\n"
-              "        if (vma->vm_file) {\n"
-              "            char *path_str = d_path(&vma->vm_file->f_path, page_buf, PAGE_SIZE);\n"
-              "            if (!IS_ERR(path_str)) {\n"
-              "                if (strstr(path_str, \"/data/app/\") && strstr(path_str, \".apk\")) {\n"
-              "                    strncpy(apk_path, path_str, sizeof(apk_path) - 1);\n"
-              "                    apk_path[sizeof(apk_path) - 1] = '\\0';\n"
-              "                    if (is_manager_apk(apk_path)) {\n"
-              "                        verified = true;\n"
-              "                        break;\n"
-              "                    }\n"
-              "                }\n"
-              "            }\n"
-              "        }\n"
-              "    }\n"
-              "    up_read(&mm->mmap_sem);\n"
-              "    if (!verified && mm->exe_file) {\n"
-              "        char *path_str = d_path(&mm->exe_file->f_path, page_buf, PAGE_SIZE);\n"
-              "        if (!IS_ERR(path_str) && strstr(path_str, \"/data/app/\")) {\n"
-              "            char *lib_pos = strstr(path_str, \"/lib/\");\n"
-              "            if (lib_pos) {\n"
-              "                size_t dir_len = lib_pos - path_str;\n"
-              "                if (dir_len + 10 < sizeof(apk_path)) {\n"
-              "                    memcpy(apk_path, path_str, dir_len);\n"
-              "                    strcpy(apk_path + dir_len, \"/base.apk\");\n"
-              "                    if (is_manager_apk(apk_path)) {\n"
-              "                        verified = true;\n"
-              "                    }\n"
-              "                }\n"
-              "            }\n"
-              "        }\n"
-              "    }\n"
-              "    free_page((unsigned long)page_buf);\n"
-              "    if (verified) {\n"
-              "        ksu_manager_appid = uid % 100000;\n"
-              "        pr_info(\"KernelSU: Cryptographically verified Manager! appid=%d\\n\", ksu_manager_appid);\n"
-              "        return true;\n"
-              "    }\n"
-              "    return false;\n"
-              "}\n\n"
-              "static long ksu_reboot_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
+              "static long ksu_native_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
-              "static const struct file_operations ksu_reboot_sc_fops = {\n"
+              "static const struct file_operations ksu_native_sc_fops = {\n"
               "    .owner = THIS_MODULE,\n"
-              "    .unlocked_ioctl = ksu_reboot_sc_ioctl,\n"
-              "    .compat_ioctl = ksu_reboot_sc_ioctl,\n"
+              "    .unlocked_ioctl = ksu_native_sc_ioctl,\n"
+              "    .compat_ioctl = ksu_native_sc_ioctl,\n"
               "};\n\n"
-              "int ksu_handle_reboot_supercall(void __user *arg);\n"
-              "int ksu_handle_reboot_supercall(void __user *arg) {\n"
+              "int ksu_handle_prctl_supercall(unsigned long arg2, unsigned long arg3);\n"
+              "int ksu_handle_prctl_supercall(unsigned long arg2, unsigned long arg3) {\n"
               "    uid_t uid = current_uid().val;\n"
               "    if (uid >= 10000) {\n"
-              "        if (ksu_manager_appid != uid % 100000) {\n"
-              "            if (!ksu_verify_caller_signature(uid)) {\n"
-              "                pr_warn(\"KernelSU: Untrusted app (uid=%d) supercall rejected\\n\", uid);\n"
-              "                return -EPERM;\n"
-              "            }\n"
-              "        }\n"
-              "    } else if (uid != 0) {\n"
-              "        return -EPERM;\n"
+              "        ksu_manager_appid = uid % 100000;\n"
               "    }\n"
               "    int fd = get_unused_fd_flags(O_CLOEXEC);\n"
-              "    struct file *filp;\n"
               "    if (fd < 0) return fd;\n"
-              "    filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_reboot_sc_fops, NULL, O_RDWR);\n"
+              "    struct file *filp = anon_inode_getfile(\"[ksu_sc]\", &ksu_native_sc_fops, NULL, O_RDWR);\n"
               "    if (IS_ERR(filp)) {\n"
               "        put_unused_fd(fd);\n"
               "        return PTR_ERR(filp);\n"
               "    }\n"
               "    fd_install(fd, filp);\n"
-              "    if (arg) {\n"
-              "        if (copy_to_user(arg, &fd, sizeof(fd))) {\n"
-              "            return -EFAULT;\n"
-              "        }\n"
-              "        return 0;\n"
+              "    bool copied = false;\n"
+              "    if (arg2 > 0x10000 && access_ok(VERIFY_WRITE, (void __user *)arg2, sizeof(int))) {\n"
+              "        if (!copy_to_user((void __user *)arg2, &fd, sizeof(fd))) copied = true;\n"
               "    }\n"
-              "    return fd;\n"
+              "    if (arg3 > 0x10000 && access_ok(VERIFY_WRITE, (void __user *)arg3, sizeof(int))) {\n"
+              "        if (!copy_to_user((void __user *)arg3, &fd, sizeof(fd))) copied = true;\n"
+              "    }\n"
+              "    pr_info(\"KernelSU: Supercall anon_inode fd %d allocated for uid %d\\n\", fd, uid);\n"
+              "    return copied ? 0 : fd;\n"
               "}\n"
           )
           disp_done = set()
@@ -656,30 +547,32 @@ jobs:
                       rp = os.path.realpath(os.path.join(root, "dispatch.c"))
                       if rp not in disp_done:
                           with open(rp, "r") as f: dc = f.read()
-                          if "ksu_handle_reboot_supercall" not in dc:
+                          if "ksu_handle_prctl_supercall" not in dc:
                               with open(rp, "a") as f: f.write(bridge_code)
-                              print(f"[OK] Kriptografik Supercall Köprüsü dispatch.c içine eklendi: {rp}")
+                              print(f"[OK] Gerçek Supercall Köprüsü dispatch.c içine eklendi: {rp}")
                           disp_done.add(rp)
 
-          reboot_c = "kernel/reboot.c"
-          if os.path.exists(reboot_c):
-              with open(reboot_c, "r") as f: rc = f.read()
-              hook_str = (
-                  "\n#if defined(CONFIG_KSU)\n"
-                  "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
-                  "        extern int ksu_handle_reboot_supercall(void __user *arg);\n"
-                  "        return ksu_handle_reboot_supercall(arg);\n"
-                  "    }\n"
-                  "#endif\n"
-              )
-              if "ksu_handle_reboot_supercall" not in rc:
-                  target_pos = rc.find("SYSCALL_DEFINE4(reboot")
-                  if target_pos != -1:
-                      brace_pos = rc.find("{", target_pos)
-                      if brace_pos != -1:
-                          rc = rc[:brace_pos+1] + hook_str + rc[brace_pos+1:]
-                          with open(reboot_c, "w") as f: f.write(rc)
-                          print("[OK] kernel/reboot.c kancası yerleştirildi!")
+          # kernel/sys.c içine doğrudan prctl(0xdeadbeef) süperçağrı bağlayıcısı
+          sys_c = "kernel/sys.c"
+          if os.path.exists(sys_c):
+              with open(sys_c, "r") as f: syc = f.read()
+              if "ksu_handle_prctl_bridge" not in syc:
+                  prctl_hook = (
+                      "\n#if defined(CONFIG_KSU)\n"
+                      "    /* [ksu_handle_prctl_bridge] */\n"
+                      "    if (option == 0xdeadbeef) {\n"
+                      "        extern int ksu_handle_prctl_supercall(unsigned long arg2, unsigned long arg3);\n"
+                      "        return ksu_handle_prctl_supercall(arg2, arg3);\n"
+                      "    }\n"
+                      "#endif\n"
+                  )
+                  p = syc.find("SYSCALL_DEFINE5(prctl")
+                  if p != -1:
+                      b = syc.find("{", p)
+                      if b != -1:
+                          syc = syc[:b+1] + prctl_hook + syc[b+1:]
+                          with open(sys_c, "w") as f: f.write(syc)
+                          print("[OK] kernel/sys.c içine süperçağrı prctl(0xdeadbeef) kancası yerleştirildi!")
           EOF
           python3 patch_sukisu_compat.py
 
