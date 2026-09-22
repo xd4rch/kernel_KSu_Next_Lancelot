@@ -415,7 +415,7 @@ jobs:
                           with open(avc_c, "w") as f: f.write(ac)
                           print("[OK] security/selinux/avc.c muafiyeti uygulandı!")
 
-          # --- kernel/sys.c içine doğrudan prctl(0xdeadbeef) sürüm ve yetkilendirme kancası ---
+          # --- kernel/sys.c içine doğrudan prctl(0xdeadbeef) standart uyumlu kanca ---
           sys_c = "kernel/sys.c"
           if os.path.exists(sys_c):
               with open(sys_c, "r") as f: syc = f.read()
@@ -426,16 +426,33 @@ jobs:
                       "    if (option == 0xdeadbeef) {\n"
                       "        extern unsigned int ksu_manager_appid;\n"
                       "        uid_t caller_uid = current_uid().val;\n"
+                      "        int ksu_ver = 40939;\n"
                       "        if (caller_uid >= 10000) {\n"
                       "            ksu_manager_appid = caller_uid % 100000;\n"
                       "        }\n"
-                      "        if (arg2) {\n"
-                      "            int ksu_ver = 40939;\n"
-                      "            if (!copy_to_user((void __user *)arg2, &ksu_ver, sizeof(ksu_ver))) {\n"
-                      "                return 0;\n"
-                      "            }\n"
+                      "        /* Standart KernelSU protokolü: arg2 = CMD (1 = GET_VERSION), arg3 = &version */\n"
+                      "        if (arg3 && access_ok(VERIFY_WRITE, (void __user *)arg3, sizeof(ksu_ver))) {\n"
+                      "            copy_to_user((void __user *)arg3, &ksu_ver, sizeof(ksu_ver));\n"
+                      "            return 0;\n"
                       "        }\n"
-                      "        return 40939;\n"
+                      "        /* Alternatif doğrudan işaretçi: prctl(0xdeadbeef, &version) */\n"
+                      "        if (arg2 > 0x10000 && access_ok(VERIFY_WRITE, (void __user *)arg2, sizeof(ksu_ver))) {\n"
+                      "            copy_to_user((void __user *)arg2, &ksu_ver, sizeof(ksu_ver));\n"
+                      "            return 0;\n"
+                      "        }\n"
+                      "        /* Doğrudan root yükseltme komutu: CMD == 2 */\n"
+                      "        if (arg2 == 2) {\n"
+                      "            struct cred *new_cred = prepare_creds();\n"
+                      "            if (new_cred) {\n"
+                      "                new_cred->uid.val = new_cred->gid.val = 0;\n"
+                      "                new_cred->euid.val = new_cred->egid.val = 0;\n"
+                      "                new_cred->suid.val = new_cred->sgid.val = 0;\n"
+                      "                new_cred->fsuid.val = new_cred->fsgid.val = 0;\n"
+                      "                commit_creds(new_cred);\n"
+                      "            }\n"
+                      "            return 0;\n"
+                      "        }\n"
+                      "        return 0;\n"
                       "    }\n"
                       "#endif\n"
                   )
@@ -460,7 +477,7 @@ jobs:
                               with open(rp, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
                           app_done.add(rp)
 
-          # 4.14 Yerel Sucompat Motoru (Stat ve Execve yönlendirmesiyle tam su entegrasyonu)
+          # 4.14 Yerel Sucompat Motoru
           manual_hook_bridge = (
               "\n/* --- 4.14 Native Working Sucompat Engine --- */\n"
               "#include <linux/fs.h>\n"
@@ -468,8 +485,7 @@ jobs:
               "#include <linux/binfmts.h>\n"
               "#include <linux/sched.h>\n"
               "#include <linux/uaccess.h>\n"
-              "#include <linux/string.h>\n"
-              "#include <linux/stat.h>\n\n"
+              "#include <linux/string.h>\n\n"
               "static inline bool ksu_is_su_path(const char __user *user_path) {\n"
               "    char buf[32];\n"
               "    long len;\n"
@@ -485,7 +501,7 @@ jobs:
               "        const char *name = (*filename_ptr)->name;\n"
               "        ksu_handle_execveat_ksud(name, (struct user_arg_ptr *)argv);\n"
               "        if (current->mm && !uaccess_kernel()) {\n"
-              "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0) {\n"
+              "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0 || strcmp(name, \"su\") == 0) {\n"
               "                struct filename *su_name = getname_kernel(\"/data/adb/ksu/bin/su\");\n"
               "                if (!IS_ERR(su_name)) {\n"
               "                    putname(*filename_ptr);\n"
