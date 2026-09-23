@@ -101,51 +101,71 @@ jobs:
           fi
 
           cat << 'EOF' > patch_core_headers.py
-          import os
+import os, re
 
-          comp_h = "include/linux/compiler.h"
-          if os.path.exists(comp_h):
-              with open(comp_h, "r") as f: c = f.read()
-              if "fallthrough" not in c:
-                  with open(comp_h, "a") as f:
-                      f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
+comp_h = "include/linux/compiler.h"
+if os.path.exists(comp_h):
+    with open(comp_h, "r") as f: c = f.read()
+    if "fallthrough" not in c:
+        with open(comp_h, "a") as f:
+            f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
 
-          tw_h = "include/linux/task_work.h"
-          if os.path.exists(tw_h):
-              with open(tw_h, "r") as f: c = f.read()
-              if "TWA_RESUME" not in c:
-                  with open(tw_h, "a") as f:
-                      f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
+tw_h = "include/linux/task_work.h"
+if os.path.exists(tw_h):
+    with open(tw_h, "r") as f: c = f.read()
+    if "TWA_RESUME" not in c:
+        with open(tw_h, "a") as f:
+            f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
 
-          uacc_global = "include/linux/uaccess.h"
-          if os.path.exists(uacc_global):
-              with open(uacc_global, "r") as f: c = f.read()
-              if "copy_from_user_nofault" not in c:
-                  defs = (
-                      "\n#ifndef copy_from_user_nofault\n"
-                      "#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n"
-                      "#endif\n"
-                      "#ifndef copy_to_user_nofault\n"
-                      "#define copy_to_user_nofault(dst, src, size) copy_to_user((void __user *)(dst), src, size)\n"
-                      "#endif\n"
-                      "#ifndef strncpy_from_user_nofault\n"
-                      "#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n"
-                      "#endif\n"
-                  )
-                  with open(uacc_global, "a") as f: f.write(defs)
+uacc_overload = (
+    "\n#undef access_ok\n"
+    "#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
+    "#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
+    "#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n"
+    "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n"
+)
 
-          sh_map = {
-              "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
-              "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
-              "include/uapi/linux/mount.h": "#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n",
-              "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n",
-              "include/vdso/datapage.h": "#ifndef _VDSO_DATAPAGE_H\n#define _VDSO_DATAPAGE_H\n#endif\n"
-          }
-          for p, h in sh_map.items():
-              os.makedirs(os.path.dirname(p), exist_ok=True)
-              if not os.path.exists(p):
-                  with open(p, "w") as f: f.write(h)
-          EOF
+uacc_global = "include/linux/uaccess.h"
+if os.path.exists(uacc_global):
+    with open(uacc_global, "r") as f: c = f.read()
+    if "copy_from_user_nofault" not in c:
+        defs = (
+            "\n#ifndef copy_from_user_nofault\n"
+            "#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n"
+            "#endif\n"
+            "#ifndef copy_to_user_nofault\n"
+            "#define copy_to_user_nofault(dst, src, size) copy_to_user((void __user *)(dst), src, size)\n"
+            "#endif\n"
+            "#ifndef strncpy_from_user_nofault\n"
+            "#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n"
+            "#endif\n"
+        )
+        c += defs
+    if "_ACCESS_OK_OVERLOAD" not in c:
+        c += uacc_overload
+    with open(uacc_global, "w") as f: f.write(c)
+
+uaccess = "arch/arm64/include/asm/uaccess.h"
+if os.path.exists(uaccess):
+    with open(uaccess, "r") as f: c = f.read()
+    c = re.sub(r'#define\s+access_ok\s*\([^\n]*', '', c)
+    if "_ACCESS_OK_OVERLOAD" not in c:
+        c += uacc_overload
+    with open(uaccess, "w") as f: f.write(c)
+    print("[OK] arch/arm64/include/asm/uaccess.h access_ok makrosu 2/3 argüman uyumlu yapıldı.")
+
+sh_map = {
+    "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
+    "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
+    "include/uapi/linux/mount.h": "#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n",
+    "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n",
+    "include/vdso/datapage.h": "#ifndef _VDSO_DATAPAGE_H\n#define _VDSO_DATAPAGE_H\n#endif\n"
+}
+for p, h in sh_map.items():
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    if not os.path.exists(p):
+        with open(p, "w") as f: f.write(h)
+EOF
           python3 patch_core_headers.py
 
       - name: Apply SukiSU 4.14 Native Sucompat, Protocol Bridge & Manager Bypass
@@ -238,6 +258,19 @@ jobs:
                           continue
 
                       orig_c = c
+
+                      if file == "kpm.c":
+                          kpm_uacc = (
+                              "#include <linux/uaccess.h>\n"
+                              "#include <asm/uaccess.h>\n"
+                              "#undef access_ok\n"
+                              "#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
+                              "#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
+                              "#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n"
+                              "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n"
+                          )
+                          c = kpm_uacc + c
+                          print(f"[OK] kpm.c access_ok desteği doğrudan eklendi: {real_p}")
 
                       if file in ["syscall_hook.h", "syscall.h"] and "_SUKISU_SYSCALL_FN_T_" not in c:
                           c = fn_t + c
