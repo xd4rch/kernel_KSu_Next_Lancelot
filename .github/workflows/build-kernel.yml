@@ -100,72 +100,72 @@ jobs:
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
 
-          cat << 'EOF' > patch_core_headers.py
-import os, re
+          cat << 'EOF' | sed 's/^          //' > patch_core_headers.py
+          import os, re
 
-comp_h = "include/linux/compiler.h"
-if os.path.exists(comp_h):
-    with open(comp_h, "r") as f: c = f.read()
-    if "fallthrough" not in c:
-        with open(comp_h, "a") as f:
-            f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
+          comp_h = "include/linux/compiler.h"
+          if os.path.exists(comp_h):
+              with open(comp_h, "r") as f: c = f.read()
+              if "fallthrough" not in c:
+                  with open(comp_h, "a") as f:
+                      f.write("\n#ifndef fallthrough\n#define fallthrough do {} while (0)\n#endif\n")
 
-tw_h = "include/linux/task_work.h"
-if os.path.exists(tw_h):
-    with open(tw_h, "r") as f: c = f.read()
-    if "TWA_RESUME" not in c:
-        with open(tw_h, "a") as f:
-            f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
+          tw_h = "include/linux/task_work.h"
+          if os.path.exists(tw_h):
+              with open(tw_h, "r") as f: c = f.read()
+              if "TWA_RESUME" not in c:
+                  with open(tw_h, "a") as f:
+                      f.write("\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n")
 
-uacc_overload = (
-    "\n#undef access_ok\n"
-    "#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
-    "#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
-    "#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n"
-    "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n"
-)
+          uacc_overload = (
+              "\n#undef access_ok\n"
+              "#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
+              "#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
+              "#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n"
+              "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n"
+          )
 
-uacc_global = "include/linux/uaccess.h"
-if os.path.exists(uacc_global):
-    with open(uacc_global, "r") as f: c = f.read()
-    if "copy_from_user_nofault" not in c:
-        defs = (
-            "\n#ifndef copy_from_user_nofault\n"
-            "#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n"
-            "#endif\n"
-            "#ifndef copy_to_user_nofault\n"
-            "#define copy_to_user_nofault(dst, src, size) copy_to_user((void __user *)(dst), src, size)\n"
-            "#endif\n"
-            "#ifndef strncpy_from_user_nofault\n"
-            "#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n"
-            "#endif\n"
-        )
-        c += defs
-    if "_ACCESS_OK_OVERLOAD" not in c:
-        c += uacc_overload
-    with open(uacc_global, "w") as f: f.write(c)
+          uacc_global = "include/linux/uaccess.h"
+          if os.path.exists(uacc_global):
+              with open(uacc_global, "r") as f: c = f.read()
+              if "copy_from_user_nofault" not in c:
+                  defs = (
+                      "\n#ifndef copy_from_user_nofault\n"
+                      "#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n"
+                      "#endif\n"
+                      "#ifndef copy_to_user_nofault\n"
+                      "#define copy_to_user_nofault(dst, src, size) copy_to_user((void __user *)(dst), src, size)\n"
+                      "#endif\n"
+                      "#ifndef strncpy_from_user_nofault\n"
+                      "#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n"
+                      "#endif\n"
+                  )
+                  c += defs
+              if "_ACCESS_OK_OVERLOAD" not in c:
+                  c += uacc_overload
+              with open(uacc_global, "w") as f: f.write(c)
 
-uaccess = "arch/arm64/include/asm/uaccess.h"
-if os.path.exists(uaccess):
-    with open(uaccess, "r") as f: c = f.read()
-    c = re.sub(r'#define\s+access_ok\s*\([^\n]*', '', c)
-    if "_ACCESS_OK_OVERLOAD" not in c:
-        c += uacc_overload
-    with open(uaccess, "w") as f: f.write(c)
-    print("[OK] arch/arm64/include/asm/uaccess.h access_ok makrosu 2/3 argüman uyumlu yapıldı.")
+          uaccess = "arch/arm64/include/asm/uaccess.h"
+          if os.path.exists(uaccess):
+              with open(uaccess, "r") as f: c = f.read()
+              c = re.sub(r'#define\s+access_ok\s*\([^\n]*', '', c)
+              if "_ACCESS_OK_OVERLOAD" not in c:
+                  c += uacc_overload
+              with open(uaccess, "w") as f: f.write(c)
+              print("[OK] arch/arm64/include/asm/uaccess.h access_ok makrosu guncellendi.")
 
-sh_map = {
-    "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
-    "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
-    "include/uapi/linux/mount.h": "#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n",
-    "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n",
-    "include/vdso/datapage.h": "#ifndef _VDSO_DATAPAGE_H\n#define _VDSO_DATAPAGE_H\n#endif\n"
-}
-for p, h in sh_map.items():
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    if not os.path.exists(p):
-        with open(p, "w") as f: f.write(h)
-EOF
+          sh_map = {
+              "include/linux/set_memory.h": "#ifndef _LINUX_SET_MEMORY_H\n#define _LINUX_SET_MEMORY_H\n#include <asm/set_memory.h>\n#endif\n",
+              "include/linux/pgtable.h": "#ifndef _LINUX_PGTABLE_H\n#define _LINUX_PGTABLE_H\n#include <asm/pgtable.h>\n#endif\n",
+              "include/uapi/linux/mount.h": "#ifndef _UAPI_LINUX_MOUNT_H\n#define _UAPI_LINUX_MOUNT_H\n#include <linux/mount.h>\n#include <uapi/linux/fs.h>\n#endif\n",
+              "include/linux/minmax.h": "#ifndef _LINUX_MINMAX_H\n#define _LINUX_MINMAX_H\n#include <linux/kernel.h>\n#endif\n",
+              "include/vdso/datapage.h": "#ifndef _VDSO_DATAPAGE_H\n#define _VDSO_DATAPAGE_H\n#endif\n"
+          }
+          for p, h in sh_map.items():
+              os.makedirs(os.path.dirname(p), exist_ok=True)
+              if not os.path.exists(p):
+                  with open(p, "w") as f: f.write(h)
+          EOF
           python3 patch_core_headers.py
 
       - name: Apply SukiSU 4.14 Native Sucompat, Protocol Bridge & Manager Bypass
@@ -174,7 +174,7 @@ EOF
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          cat << 'EOF' > patch_sukisu_compat.py
+          cat << 'EOF' | sed 's/^          //' > patch_sukisu_compat.py
           import os, re
 
           fn_t = (
@@ -186,7 +186,8 @@ EOF
           fw_h = (
               "#ifndef _SUKISU_FILE_WRAPPER_4_14_\n#define _SUKISU_FILE_WRAPPER_4_14_\n"
               "#include <linux/version.h>\n#include <linux/fs.h>\n#include <linux/file.h>\n"
-              "#include <linux/dcache.h>\n#include <linux/mount.h>\n#include <linux/security.h>\n#include <linux/err.h>\n"
+              "#include <linux/dcache.h>\n#include <linux/mount.h>\n#include <linux/security.h>\n"
+              "#include <linux/err.h>\n"
               "typedef unsigned int __poll_t;\n#define REMAP_FILE_DEDUP 0\n"
               "static inline int security_inode_init_security_anon(struct inode *i, const struct qstr *n, const struct inode *c) { return 0; }\n"
               "#define selinux_inode(i) ((struct inode_security_struct *)(i)->i_security)\n"
@@ -267,7 +268,7 @@ EOF
                               "#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
                               "#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
                               "#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n"
-                              "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n"
+                              "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n\n"
                           )
                           c = kpm_uacc + c
                           print(f"[OK] kpm.c access_ok desteği doğrudan eklendi: {real_p}")
