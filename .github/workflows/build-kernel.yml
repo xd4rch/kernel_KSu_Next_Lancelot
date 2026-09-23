@@ -106,16 +106,15 @@ jobs:
           # 2. include/linux/task_work.h TWA_RESUME
           grep -q "TWA_RESUME" include/linux/task_work.h 2>/dev/null || printf '\n#ifndef TWA_RESUME\n#define TWA_NONE 0\n#define TWA_RESUME 1\n#define TWA_SIGNAL 2\n#endif\n' >> include/linux/task_work.h
 
-          # 3. include/linux/uaccess.h copy_from_user_nofault & access_ok overload
+          # 3. include/linux/uaccess.h copy_from_user_nofault
           if [ -f include/linux/uaccess.h ]; then
             grep -q "copy_from_user_nofault" include/linux/uaccess.h || printf '\n#ifndef copy_from_user_nofault\n#define copy_from_user_nofault(dst, src, size) copy_from_user(dst, (const void __user *)(src), size)\n#define copy_to_user_nofault(dst, src, size) copy_to_user((void __user *)(dst), src, size)\n#define strncpy_from_user_nofault(dst, src, size) strncpy_from_user(dst, (const char __user *)(src), size)\n#endif\n' >> include/linux/uaccess.h
-            grep -q "_ACCESS_OK_OVERLOAD" include/linux/uaccess.h || printf '\n#undef access_ok\n#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n' >> include/linux/uaccess.h
           fi
 
-          # 4. arch/arm64/include/asm/uaccess.h access_ok 2/3 argüman desteği
+          # 4. arch/arm64/include/asm/uaccess.h 110. satırda YERİNDE (in-place) access_ok overload
           if [ -f arch/arm64/include/asm/uaccess.h ]; then
-            sed -i -E 's|^[[:space:]]*#define[[:space:]]+access_ok[[:space:]]*\(.*||g' arch/arm64/include/asm/uaccess.h
-            grep -q "_ACCESS_OK_OVERLOAD" arch/arm64/include/asm/uaccess.h || printf '\n#undef access_ok\n#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n' >> arch/arm64/include/asm/uaccess.h
+            sed -i -E 's|^[[:space:]]*#define[[:space:]]+access_ok\(type,.*|#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)|' arch/arm64/include/asm/uaccess.h
+            echo "[OK] arch/arm64/include/asm/uaccess.h access_ok makrosu 110. satırda yerinde güncellendi."
           fi
 
           # 5. Eksik başlık dosyaları
@@ -131,7 +130,8 @@ jobs:
         run: |
           import os, re
 
-          os.chdir(os.path.join(os.environ['GITHUB_WORKSPACE'], 'kernel_workspace/android-kernel'))
+          kernel_dir = os.path.join(os.environ['GITHUB_WORKSPACE'], 'kernel_workspace/android-kernel')
+          os.chdir(kernel_dir)
 
           fn_t = (
               "#ifndef _SUKISU_SYSCALL_FN_T_\n#define _SUKISU_SYSCALL_FN_T_\n"
@@ -215,19 +215,6 @@ jobs:
                           continue
 
                       orig_c = c
-
-                      if file == "kpm.c":
-                          kpm_uacc = (
-                              "#include <linux/uaccess.h>\n"
-                              "#include <asm/uaccess.h>\n"
-                              "#undef access_ok\n"
-                              "#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
-                              "#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n"
-                              "#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n"
-                              "#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)\n\n"
-                          )
-                          c = kpm_uacc + c
-                          print(f"[OK] kpm.c access_ok desteği eklendi: {real_p}")
 
                       if file in ["syscall_hook.h", "syscall.h"] and "_SUKISU_SYSCALL_FN_T_" not in c:
                           c = fn_t + c
