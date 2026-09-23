@@ -300,7 +300,6 @@ jobs:
                               c = sel_head + c
 
                           c = c.replace('"u:r:ksu:s0"', '"u:r:su:s0"')
-                          c = c.replace("static int set_domain(", "int set_domain(")
 
                           c = re.sub(
                               r'error\s*=\s*security_secctx_to_secid\s*\(\s*domain\s*,\s*strlen\s*\(\s*domain\s*\)\s*,\s*&sid\s*\);',
@@ -496,7 +495,7 @@ jobs:
                               print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {rp}")
                           ksud_done.add(rp)
 
-          # dispatch.c İçine Standart Komut ve Supercall Köprüsü
+          # dispatch.c İçine Standart Komut ve Supercall Köprüsü (Linker Hatalarından Arındırılmış)
           bridge_code = (
               "\n/* --- SukiSU Protocol Compliant Command & Supercall Bridge --- */\n"
               "#include <linux/fs.h>\n"
@@ -507,8 +506,7 @@ jobs:
               "#include <linux/cred.h>\n"
               "#include <linux/capability.h>\n"
               "#include <linux/sched.h>\n\n"
-              "extern unsigned int ksu_manager_appid;\n"
-              "extern int set_domain(const char *domain);\n\n"
+              "extern unsigned int ksu_manager_appid;\n\n"
               "static long ksu_native_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
@@ -553,8 +551,7 @@ jobs:
               "            new_cred->cap_inheritable = CAP_FULL_SET;\n"
               "            commit_creds(new_cred);\n"
               "        }\n"
-              "        set_domain(\"u:r:su:s0\");\n"
-              "        pr_info(\"KernelSU: Granted root to manager (uid=%d)\\n\", uid);\n"
+              "        pr_info(\"KernelSU: Granted root to caller (uid=%d)\\n\", uid);\n"
               "        return 0;\n"
               "    }\n\n"
               "    /* 3. Doğrudan işaretçi ile sürüm sorgusu */\n"
