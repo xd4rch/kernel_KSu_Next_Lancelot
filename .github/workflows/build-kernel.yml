@@ -114,7 +114,7 @@ jobs:
           # 4. arch/arm64/include/asm/uaccess.h access_ok 2/3 argüman desteği
           if [ -f arch/arm64/include/asm/uaccess.h ]; then
             sed -i -E 's|^[[:space:]]*#define[[:space:]]+access_ok\(type,.*|#define _ACCESS_OK_2(addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_3(type, addr, size) __range_ok((unsigned long)(addr), (unsigned long)(size))\n#define _ACCESS_OK_OVERLOAD(_1, _2, _3, NAME, ...) NAME\n#define access_ok(...) _ACCESS_OK_OVERLOAD(__VA_ARGS__, _ACCESS_OK_3, _ACCESS_OK_2)(__VA_ARGS__)|' arch/arm64/include/asm/uaccess.h
-            echo "[OK] arch/arm64/include/asm/uaccess.h access_ok makrosu 110. satırda yerinde güncellendi."
+            echo "[OK] arch/arm64/include/asm/uaccess.h access_ok makrosu güncellendi."
           fi
 
           # 5. Eksik başlık dosyaları
@@ -593,14 +593,14 @@ jobs:
               "    }\n"
               "    return driver_fd;\n"
               "}\n\n"
-              "int ksu_handle_reboot_bridge(int magic1, int magic2, void __user *arg);\n"
-              "int ksu_handle_reboot_bridge(int magic1, int magic2, void __user *arg) {\n"
+              "int ksu_handle_reboot_bridge(int magic1, int magic2, unsigned int cmd, void __user *arg);\n"
+              "int ksu_handle_reboot_bridge(int magic1, int magic2, unsigned int cmd, void __user *arg) {\n"
               "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
               "        int driver_fd = ksu_ensure_driver_fd();\n"
-              "        if (arg && driver_fd >= 0) {\n"
+              "        if (arg && (unsigned long)arg > 0x1000) {\n"
               "            copy_to_user(arg, &driver_fd, sizeof(driver_fd));\n"
               "        }\n"
-              "        return 0;\n"
+              "        return driver_fd;\n"
               "    }\n"
               "    return -EINVAL;\n"
               "}\n"
@@ -618,12 +618,10 @@ jobs:
                               print(f"[OK] Standart Prctl & Reboot Köprüsü dispatch.c içine eklendi: {rp}")
                           disp_done.add(rp)
 
-          # kernel/sys.c içine hem prctl hem de reboot kancası
+          # 1. kernel/sys.c içine prctl kancası
           sys_c = "kernel/sys.c"
           if os.path.exists(sys_c):
               with open(sys_c, "r") as f: syc = f.read()
-
-              # prctl hook
               if "ksu_handle_prctl_bridge" not in syc:
                   prctl_hook = (
                       "\n#if defined(CONFIG_KSU)\n"
@@ -639,27 +637,30 @@ jobs:
                       b = syc.find("{", p)
                       if b != -1:
                           syc = syc[:b+1] + prctl_hook + syc[b+1:]
+                          with open(sys_c, "w") as f: f.write(syc)
                           print("[OK] kernel/sys.c içine prctl kancası yerleştirildi!")
 
-              # reboot hook (ksud için can damarı)
-              if "ksu_handle_reboot_bridge" not in syc:
-                  reboot_hook = (
-                      "\n#if defined(CONFIG_KSU)\n"
-                      "    /* [ksu_handle_reboot_bridge] */\n"
-                      "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
-                      "        extern int ksu_handle_reboot_bridge(int magic1, int magic2, void __user *arg);\n"
-                      "        return ksu_handle_reboot_bridge(magic1, magic2, arg);\n"
-                      "    }\n"
-                      "#endif\n"
-                  )
-                  p = syc.find("SYSCALL_DEFINE4(reboot")
-                  if p != -1:
-                      b = syc.find("{", p)
-                      if b != -1:
-                          syc = syc[:b+1] + reboot_hook + syc[b+1:]
-                          print("[OK] kernel/sys.c içine reboot(0xdeadbeef, 0xcafebabe) kancası yerleştirildi!")
-
-              with open(sys_c, "w") as f: f.write(syc)
+          # 2. kernel/reboot.c VE kernel/sys.c içine reboot kancası (ksud için can damarı)
+          reboot_hook = (
+              "\n#if defined(CONFIG_KSU)\n"
+              "    /* [ksu_handle_reboot_bridge] */\n"
+              "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
+              "        extern int ksu_handle_reboot_bridge(int magic1, int magic2, unsigned int cmd, void __user *arg);\n"
+              "        return ksu_handle_reboot_bridge(magic1, magic2, cmd, arg);\n"
+              "    }\n"
+              "#endif\n"
+          )
+          for rfile in ["kernel/reboot.c", "kernel/sys.c"]:
+              if os.path.exists(rfile):
+                  with open(rfile, "r") as f: rcontent = f.read()
+                  if "ksu_handle_reboot_bridge" not in rcontent:
+                      m = re.search(r'SYSCALL_DEFINE4\s*\(\s*reboot\b', rcontent)
+                      if m:
+                          b = rcontent.find("{", m.end())
+                          if b != -1:
+                              rcontent = rcontent[:b+1] + reboot_hook + rcontent[b+1:]
+                              with open(rfile, "w") as f: f.write(rcontent)
+                              print(f"[OK] {rfile} içine reboot(0xdeadbeef, 0xcafebabe) kancası yerleştirildi!")
 
       - name: Setup Configuration
         shell: bash
