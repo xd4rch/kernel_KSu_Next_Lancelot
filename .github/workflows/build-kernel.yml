@@ -172,7 +172,6 @@ jobs:
               "#endif /* _SUKISU_SEL_HEAD_ */\n\n"
           )
 
-          # sucompat.c STUB LİSTESİNDEN ÇIKARILDI!
           stub_map = {
               "lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "syscall_hook.c": "void *ksu_syscall_table[512] = { 0 };\nint ksu_syscall_hook_init(void) { return 0; }\nvoid ksu_syscall_hook_exit(void) {}\nvoid ksu_stop_ksud_execve_hook(void) {}\nint ksu_syscall_table_hook(int nr, void *hook_fn, void **orig_fn) { return 0; }\nint ksu_syscall_table_unhook(int nr) { return 0; }\n",
@@ -435,11 +434,11 @@ jobs:
               "    return (strcmp(buf, \"/system/bin/su\") == 0 || strcmp(buf, \"/system/xbin/su\") == 0 || strcmp(buf, \"su\") == 0);\n"
               "}\n\n"
               "/* 3. Execveat Kancası: Gerçek /data/adb/ksu/bin/su'ya Yönlendir */\n"
-              "extern void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv);\n"
+              "extern void ksu_handle_execveat_ksud(const char *filename, void *argv);\n"
               "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
               "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
               "        const char *name = (*filename_ptr)->name;\n"
-              "        ksu_handle_execveat_ksud(name, (struct user_arg_ptr *)argv);\n"
+              "        ksu_handle_execveat_ksud(name, argv);\n"
               "        if (current->mm && !uaccess_kernel()) {\n"
               "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0 || strcmp(name, \"su\") == 0) {\n"
               "                struct filename *su_name = getname_kernel(\"/data/adb/ksu/bin/su\");\n"
