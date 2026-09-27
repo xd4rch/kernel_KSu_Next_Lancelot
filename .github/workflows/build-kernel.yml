@@ -172,6 +172,7 @@ jobs:
               "#endif /* _SUKISU_SEL_HEAD_ */\n\n"
           )
 
+          # sucompat.c STUB LİSTESİNDEN ÇIKARILDI!
           stub_map = {
               "lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "syscall_hook.c": "void *ksu_syscall_table[512] = { 0 };\nint ksu_syscall_hook_init(void) { return 0; }\nvoid ksu_syscall_hook_exit(void) {}\nvoid ksu_stop_ksud_execve_hook(void) {}\nint ksu_syscall_table_hook(int nr, void *hook_fn, void **orig_fn) { return 0; }\nint ksu_syscall_table_unhook(int nr) { return 0; }\n",
@@ -183,8 +184,7 @@ jobs:
               "sepolicy.c": "struct selinux_policy;\nstruct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *o){return (void*)0;}\nint handle_sepolicy(unsigned long arg){return 0;}\n",
               "selinux_hide.c": "int ksu_selinux_hide_init(void){return 0;}\nvoid ksu_selinux_hide_exit(void){}\nbool ksu_is_selinux_hide_enabled(void){return false;}\nint ksu_set_selinux_hide(bool e){return 0;}\nint ksu_get_selinux_hide(void){return 0;}\nvoid ksu_selinux_hide_handle_post_fs_data(void){}\nvoid ksu_selinux_hide_drop_backup_if_unused(void){}\nvoid ksu_selinux_hide_handle_second_stage(void){}\n",
               "cpu_spoof.c": "int ksu_cpu_spoof_init(void){return 0;}\nvoid ksu_cpu_spoof_exit(void){}\nbool ksu_is_cpu_spoof_enabled(void){return false;}\nint ksu_set_cpu_spoof(bool e){return 0;}\nint ksu_get_cpu_spoof(void){return 0;}\nvoid ksu_set_spoof_cpu(bool e){}\n",
-              "su_mount_ns.c": "int ksu_su_mount_ns_init(void){return 0;}\nvoid ksu_su_mount_ns_exit(void){}\nint setup_mount_ns(void){return 0;}\n",
-              "sucompat.c": "int ksu_sucompat_init(void){return 0;}\nvoid ksu_sucompat_exit(void){}\n"
+              "su_mount_ns.c": "int ksu_su_mount_ns_init(void){return 0;}\nvoid ksu_su_mount_ns_exit(void){}\nint setup_mount_ns(void){return 0;}\n"
           }
 
           visited_files = set()
@@ -405,15 +405,26 @@ jobs:
                               with open(rp, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
                           app_done.add(rp)
 
-          # 4.14 Yerel Sucompat Motoru
-          manual_hook_bridge = (
-              "\n/* --- 4.14 Native Working Sucompat Engine --- */\n"
+          # 4.14 Native Working Sucompat Engine (Yol Yönlendirme ve Özellik Kaydı)
+          full_sucompat_engine = (
+              "#include <linux/types.h>\n"
               "#include <linux/fs.h>\n"
               "#include <linux/file.h>\n"
               "#include <linux/binfmts.h>\n"
               "#include <linux/sched.h>\n"
               "#include <linux/uaccess.h>\n"
-              "#include <linux/string.h>\n\n"
+              "#include <linux/string.h>\n"
+              "#include <asm/ptrace.h>\n\n"
+              "/* 1. Sucompat Özellik Desteği (feature.c ve ksud için) */\n"
+              "bool ksu_su_compat_enabled = true;\n"
+              "bool ksu_is_su_compat_enabled(void) { return ksu_su_compat_enabled; }\n"
+              "bool ksu_sucompat_is_supported(void) { return true; }\n"
+              "bool ksu_is_su_compat_supported(void) { return true; }\n"
+              "int ksu_set_su_compat(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
+              "int ksu_set_su_compat_enabled(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
+              "int ksu_sucompat_init(void) { return 0; }\n"
+              "void ksu_sucompat_exit(void) {}\n\n"
+              "/* 2. Su Yolu Tespiti */\n"
               "static inline bool ksu_is_su_path(const char __user *user_path) {\n"
               "    char buf[32];\n"
               "    long len;\n"
@@ -423,6 +434,8 @@ jobs:
               "    buf[sizeof(buf) - 1] = '\\0';\n"
               "    return (strcmp(buf, \"/system/bin/su\") == 0 || strcmp(buf, \"/system/xbin/su\") == 0 || strcmp(buf, \"su\") == 0);\n"
               "}\n\n"
+              "/* 3. Execveat Kancası: Gerçek /data/adb/ksu/bin/su'ya Yönlendir */\n"
+              "extern void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv);\n"
               "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
               "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
               "        const char *name = (*filename_ptr)->name;\n"
@@ -439,37 +452,48 @@ jobs:
               "    }\n"
               "    return 0;\n"
               "}\n\n"
+              "/* 4. Stat & Faccessat Kancaları: Kullanıcı Yığını Üzerinden /system/bin/sh İle Simüle Et */\n"
               "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
-              "    if (filename_user && ksu_is_su_path(*filename_user)) {\n"
-              "        return 1;\n"
+              "    if (filename_user && *filename_user && ksu_is_su_path(*filename_user)) {\n"
+              "        struct pt_regs *regs = task_pt_regs(current);\n"
+              "        if (regs && regs->sp > 0x1000) {\n"
+              "            char __user *fake = (char __user *)(regs->sp - 64);\n"
+              "            if (copy_to_user(fake, \"/system/bin/sh\", 15) == 0) {\n"
+              "                *filename_user = fake;\n"
+              "                return 1;\n"
+              "            }\n"
+              "        }\n"
               "    }\n"
               "    return 0;\n"
               "}\n\n"
               "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
-              "    if (filename_user && ksu_is_su_path(*filename_user)) {\n"
-              "        return 1;\n"
+              "    if (filename_user && *filename_user && ksu_is_su_path(*filename_user)) {\n"
+              "        struct pt_regs *regs = task_pt_regs(current);\n"
+              "        if (regs && regs->sp > 0x1000) {\n"
+              "            char __user *fake = (char __user *)(regs->sp - 64);\n"
+              "            if (copy_to_user(fake, \"/system/bin/sh\", 15) == 0) {\n"
+              "                *filename_user = fake;\n"
+              "                return 1;\n"
+              "            }\n"
+              "        }\n"
               "    }\n"
               "    return 0;\n"
               "}\n\n"
-              "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) {\n"
-              "    return 0;\n"
-              "}\n\n"
-              "int ksu_handle_devpts(struct inode *inode) {\n"
-              "    return 0;\n"
-              "}\n"
+              "int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr) { return 0; }\n"
+              "int ksu_handle_devpts(struct inode *inode) { return 0; }\n"
           )
-          ksud_done = set()
+
+          sucomp_done = set()
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir): continue
               for root, dirs, files in os.walk(kdir, followlinks=True):
-                  if "ksud_integration.c" in files:
-                      rp = os.path.realpath(os.path.join(root, "ksud_integration.c"))
-                      if rp not in ksud_done:
-                          with open(rp, "r") as f: kc = f.read()
-                          if "ksu_handle_execveat(" not in kc:
-                              with open(rp, "a") as f: f.write(manual_hook_bridge)
-                              print(f"[OK] 4.14 Yerel Sucompat Motoru eklendi: {rp}")
-                          ksud_done.add(rp)
+                  if "sucompat.c" in files:
+                      rp = os.path.realpath(os.path.join(root, "sucompat.c"))
+                      if rp not in sucomp_done:
+                          with open(rp, "w", encoding="utf-8") as f:
+                              f.write(full_sucompat_engine)
+                          print(f"[OK] 4.14 Native Sucompat Motoru sucompat.c içine yazıldı: {rp}")
+                          sucomp_done.add(rp)
 
           # dispatch.c [ksu_driver], Sabit Sürüm ve Hem Prctl Hem Reboot Köprüsü
           bridge_code = (
@@ -485,7 +509,8 @@ jobs:
               "#include <linux/security.h>\n"
               "#include <linux/sched.h>\n\n"
               "extern unsigned int ksu_manager_appid;\n"
-              "extern int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);\n\n"
+              "extern int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);\n"
+              "extern const struct file_operations anon_ksu_fops;\n\n"
               "struct ksu_task_sec {\n"
               "    u32 osid;\n"
               "    u32 sid;\n"
@@ -506,6 +531,7 @@ jobs:
               "    struct files_struct *files = current->files;\n"
               "    struct fdtable *fdt;\n"
               "    struct file *filp;\n"
+              "    const struct file_operations *fops = &anon_ksu_fops;\n"
               "    int i, fd;\n"
               "    if (!files) return -EINVAL;\n"
               "    spin_lock(&files->file_lock);\n"
@@ -524,7 +550,10 @@ jobs:
               "    spin_unlock(&files->file_lock);\n"
               "    fd = get_unused_fd_flags(0);\n"
               "    if (fd < 0) return fd;\n"
-              "    filp = anon_inode_getfile(\"[ksu_driver]\", &ksu_native_sc_fops, NULL, O_RDWR);\n"
+              "    filp = anon_inode_getfile(\"[ksu_driver]\", fops, NULL, O_RDWR);\n"
+              "    if (IS_ERR(filp)) {\n"
+              "        filp = anon_inode_getfile(\"[ksu_driver]\", &ksu_native_sc_fops, NULL, O_RDWR);\n"
+              "    }\n"
               "    if (IS_ERR(filp)) {\n"
               "        put_unused_fd(fd);\n"
               "        return PTR_ERR(filp);\n"
@@ -542,7 +571,7 @@ jobs:
               "    /* 1. Sürüm Talebi: KSU_CMD_GET_VERSION (arg2 == 1) */\n"
               "    if (arg2 == 1) {\n"
               "        int ksu_ver = 40900;\n"
-              "        int flags = 0;\n"
+              "        int flags = 1; /* 1 = Manual Hook */\n"
               "        if (arg3) {\n"
               "            copy_to_user((void __user *)arg3, &ksu_ver, sizeof(int));\n"
               "        }\n"
@@ -640,7 +669,7 @@ jobs:
                           with open(sys_c, "w") as f: f.write(syc)
                           print("[OK] kernel/sys.c içine prctl kancası yerleştirildi!")
 
-          # 2. kernel/reboot.c VE kernel/sys.c içine reboot kancası (ksud için can damarı)
+          # 2. kernel/reboot.c VE kernel/sys.c içine reboot kancası
           reboot_hook = (
               "\n#if defined(CONFIG_KSU)\n"
               "    /* [ksu_handle_reboot_bridge] */\n"
@@ -676,6 +705,7 @@ jobs:
             echo "CONFIG_KALLSYMS_ALL=y"
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "CONFIG_KSU_SUCOMPAT=y"
             echo "CONFIG_KPM=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
