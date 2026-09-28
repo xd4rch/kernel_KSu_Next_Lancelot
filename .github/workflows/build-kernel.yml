@@ -172,7 +172,6 @@ jobs:
               "#endif /* _SUKISU_SEL_HEAD_ */\n\n"
           )
 
-          # sucompat.c STUB listesinden çıkarıldı, native sucompat motoru üstlenecek
           stub_map = {
               "lsm_hook.c": "int ksu_lsm_hook_init(void){return 0;}\nvoid ksu_lsm_hook_exit(void){}\n",
               "syscall_hook.c": "void *ksu_syscall_table[512] = { 0 };\nint ksu_syscall_hook_init(void) { return 0; }\nvoid ksu_syscall_hook_exit(void) {}\nvoid ksu_stop_ksud_execve_hook(void) {}\nint ksu_syscall_table_hook(int nr, void *hook_fn, void **orig_fn) { return 0; }\nint ksu_syscall_table_unhook(int nr) { return 0; }\n",
@@ -405,7 +404,26 @@ jobs:
                               with open(rp, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
                           app_done.add(rp)
 
-          # 4.14 Native Working Sucompat Engine (Yol Yönlendirme ve Özellik Kaydı)
+          # feature.c ve feature.h içerisindeki su_compat kısıtlamalarını kaldırma
+          for kdir in ["drivers/kernelsu", "KernelSU"]:
+              if not os.path.exists(kdir): continue
+              for root, dirs, files in os.walk(kdir, followlinks=True):
+                  for file in files:
+                      if file in ["feature.c", "feature.h", "kernel_umount.c"]:
+                          fp = os.path.realpath(os.path.join(root, file))
+                          with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                              fc = f.read()
+                          orig_fc = fc
+                          fc = fc.replace("CONFIG_KSU_MANUAL_HOOK", "_DISABLED_MANUAL_HOOK_CHECK_")
+                          fc = re.sub(r'bool\s+su_compat_is_supported\s*\([^)]*\)\s*\{[^}]*\}', 'bool su_compat_is_supported(void) { return true; }', fc)
+                          fc = re.sub(r'bool\s+ksu_su_compat_is_supported\s*\([^)]*\)\s*\{[^}]*\}', 'bool ksu_su_compat_is_supported(void) { return true; }', fc)
+                          fc = re.sub(r'bool\s+ksu_is_su_compat_supported\s*\([^)]*\)\s*\{[^}]*\}', 'bool ksu_is_su_compat_supported(void) { return true; }', fc)
+                          if fc != orig_fc:
+                              with open(fp, "w", encoding="utf-8") as f:
+                                  f.write(fc)
+                              print(f"[OK] feature desteği açıldı: {fp}")
+
+          # 4.14 Native Working Sucompat Engine (Seçici İzin, Credential Elevation ve Stealth Modu)
           full_sucompat_engine = (
               "#include <linux/types.h>\n"
               "#include <linux/fs.h>\n"
@@ -414,17 +432,42 @@ jobs:
               "#include <linux/sched.h>\n"
               "#include <linux/uaccess.h>\n"
               "#include <linux/string.h>\n"
+              "#include <linux/cred.h>\n"
+              "#include <linux/capability.h>\n"
+              "#include <linux/security.h>\n"
               "#include <asm/ptrace.h>\n\n"
-              "/* 1. Sucompat Özellik Desteği (feature.c ve ksud için) */\n"
+              "struct ksu_task_sec {\n"
+              "    u32 osid;\n"
+              "    u32 sid;\n"
+              "    u32 exec_sid;\n"
+              "    u32 create_sid;\n"
+              "    u32 keycreate_sid;\n"
+              "    u32 sockcreate_sid;\n"
+              "};\n\n"
+              "extern int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);\n"
+              "extern bool ksu_is_allow_uid(uid_t uid) __attribute__((weak));\n\n"
+              "/* 1. Sucompat Özellik Desteği (feature.c ve ksud için tam köprü) */\n"
               "bool ksu_su_compat_enabled = true;\n"
               "bool ksu_is_su_compat_enabled(void) { return ksu_su_compat_enabled; }\n"
               "bool ksu_sucompat_is_supported(void) { return true; }\n"
               "bool ksu_is_su_compat_supported(void) { return true; }\n"
+              "bool ksu_su_compat_is_supported(void) { return true; }\n"
+              "bool su_compat_is_supported(void) { return true; }\n"
+              "bool ksu_su_compat_get(void) { return true; }\n"
+              "bool ksu_su_compat_get_status(void) { return true; }\n"
+              "int ksu_su_compat_set(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
+              "int ksu_su_compat_set_status(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
               "int ksu_set_su_compat(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
               "int ksu_set_su_compat_enabled(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
               "int ksu_sucompat_init(void) { return 0; }\n"
               "void ksu_sucompat_exit(void) {}\n\n"
-              "/* 2. Su Yolu Tespiti */\n"
+              "/* 2. Çağıran Sürecin İzin Kontrolü */\n"
+              "static inline bool ksu_is_caller_allowed(uid_t uid) {\n"
+              "    if (uid == 0 || uid == 2000) return true;\n"
+              "    if (ksu_is_allow_uid) return ksu_is_allow_uid(uid);\n"
+              "    return false;\n"
+              "}\n\n"
+              "/* 3. Su Yolu Tespiti */\n"
               "static inline bool ksu_is_su_path(const char __user *user_path) {\n"
               "    char buf[32];\n"
               "    long len;\n"
@@ -434,7 +477,7 @@ jobs:
               "    buf[sizeof(buf) - 1] = '\\0';\n"
               "    return (strcmp(buf, \"/system/bin/su\") == 0 || strcmp(buf, \"/system/xbin/su\") == 0 || strcmp(buf, \"su\") == 0);\n"
               "}\n\n"
-              "/* 3. Execveat Kancası: Gerçek /data/adb/ksu/bin/su'ya Yönlendir */\n"
+              "/* 4. Execveat Kancası: İzinli süreci anında ROOT yap ve /data/adb/ksu/bin/su'ya yönlendir */\n"
               "extern void ksu_handle_execveat_ksud(const char *filename, void *argv);\n"
               "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags) {\n"
               "    if (filename_ptr && *filename_ptr && (*filename_ptr)->name) {\n"
@@ -442,25 +485,53 @@ jobs:
               "        ksu_handle_execveat_ksud(name, argv);\n"
               "        if (current->mm && !uaccess_kernel()) {\n"
               "            if (strcmp(name, \"/system/bin/su\") == 0 || strcmp(name, \"/system/xbin/su\") == 0 || strcmp(name, \"su\") == 0) {\n"
-              "                struct filename *su_name = getname_kernel(\"/data/adb/ksu/bin/su\");\n"
-              "                if (!IS_ERR(su_name)) {\n"
-              "                    putname(*filename_ptr);\n"
-              "                    *filename_ptr = su_name;\n"
+              "                if (ksu_is_caller_allowed(current_uid().val)) {\n"
+              "                    struct filename *su_name = getname_kernel(\"/data/adb/ksu/bin/su\");\n"
+              "                    if (!IS_ERR(su_name)) {\n"
+              "                        struct cred *new_cred = prepare_creds();\n"
+              "                        if (new_cred) {\n"
+              "                            new_cred->uid.val = 0;\n"
+              "                            new_cred->gid.val = 0;\n"
+              "                            new_cred->euid.val = 0;\n"
+              "                            new_cred->egid.val = 0;\n"
+              "                            new_cred->suid.val = 0;\n"
+              "                            new_cred->sgid.val = 0;\n"
+              "                            new_cred->fsuid.val = 0;\n"
+              "                            new_cred->fsgid.val = 0;\n"
+              "                            new_cred->cap_effective = CAP_FULL_SET;\n"
+              "                            new_cred->cap_permitted = CAP_FULL_SET;\n"
+              "                            new_cred->cap_bset = CAP_FULL_SET;\n"
+              "                            new_cred->cap_inheritable = CAP_FULL_SET;\n"
+              "                            if (new_cred->security) {\n"
+              "                                u32 su_sid = 0;\n"
+              "                                if (!security_secctx_to_secid(\"u:r:su:s0\", 10, &su_sid)) {\n"
+              "                                    struct ksu_task_sec *tsec = new_cred->security;\n"
+              "                                    tsec->sid = su_sid;\n"
+              "                                    tsec->osid = su_sid;\n"
+              "                                }\n"
+              "                            }\n"
+              "                            commit_creds(new_cred);\n"
+              "                        }\n"
+              "                        putname(*filename_ptr);\n"
+              "                        *filename_ptr = su_name;\n"
+              "                    }\n"
               "                }\n"
               "            }\n"
               "        }\n"
               "    }\n"
               "    return 0;\n"
               "}\n\n"
-              "/* 4. Stat & Faccessat Kancaları: Kullanıcı Yığını Üzerinden /system/bin/sh İle Simüle Et */\n"
+              "/* 5. Stat & Faccessat: İzinli sürece /system/bin/sh simülasyonu sun, izinsiz olana ENOENT ver */\n"
               "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags) {\n"
               "    if (filename_user && *filename_user && ksu_is_su_path(*filename_user)) {\n"
-              "        struct pt_regs *regs = task_pt_regs(current);\n"
-              "        if (regs && regs->sp > 0x1000) {\n"
-              "            char __user *fake = (char __user *)(regs->sp - 64);\n"
-              "            if (copy_to_user(fake, \"/system/bin/sh\", 15) == 0) {\n"
-              "                *filename_user = fake;\n"
-              "                return 1;\n"
+              "        if (ksu_is_caller_allowed(current_uid().val)) {\n"
+              "            struct pt_regs *regs = task_pt_regs(current);\n"
+              "            if (regs && regs->sp > 0x1000) {\n"
+              "                char __user *fake = (char __user *)(regs->sp - 64);\n"
+              "                if (copy_to_user(fake, \"/system/bin/sh\", 15) == 0) {\n"
+              "                    *filename_user = fake;\n"
+              "                    return 1;\n"
+              "                }\n"
               "            }\n"
               "        }\n"
               "    }\n"
@@ -468,12 +539,14 @@ jobs:
               "}\n\n"
               "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags) {\n"
               "    if (filename_user && *filename_user && ksu_is_su_path(*filename_user)) {\n"
-              "        struct pt_regs *regs = task_pt_regs(current);\n"
-              "        if (regs && regs->sp > 0x1000) {\n"
-              "            char __user *fake = (char __user *)(regs->sp - 64);\n"
-              "            if (copy_to_user(fake, \"/system/bin/sh\", 15) == 0) {\n"
-              "                *filename_user = fake;\n"
-              "                return 1;\n"
+              "        if (ksu_is_caller_allowed(current_uid().val)) {\n"
+              "            struct pt_regs *regs = task_pt_regs(current);\n"
+              "            if (regs && regs->sp > 0x1000) {\n"
+              "                char __user *fake = (char __user *)(regs->sp - 64);\n"
+              "                if (copy_to_user(fake, \"/system/bin/sh\", 15) == 0) {\n"
+              "                    *filename_user = fake;\n"
+              "                    return 1;\n"
+              "                }\n"
               "            }\n"
               "        }\n"
               "    }\n"
