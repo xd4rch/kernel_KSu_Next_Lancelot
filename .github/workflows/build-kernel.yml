@@ -298,6 +298,15 @@ jobs:
                           with open(real_p, "w", encoding="utf-8") as f:
                               f.write(c)
 
+          # Makefile içine doğrudan C derleme bayraklarını ekleme
+          for mfile in ["drivers/kernelsu/Makefile", "KernelSU/kernel/Makefile"]:
+              if os.path.exists(mfile):
+                  with open(mfile, "r") as f: mc = f.read()
+                  if "CONFIG_KSU_MANUAL_HOOK" not in mc:
+                      with open(mfile, "a") as f:
+                          f.write("\nccflags-y += -DCONFIG_KSU_MANUAL_HOOK=1 -DCONFIG_KSU_SUCOMPAT=1\n")
+                      print(f"[OK] ccflags-y zorlandı: {mfile}")
+
           # perm.c sembol tablosu
           perm_code = (
               "#include <linux/fs.h>\n"
@@ -404,7 +413,7 @@ jobs:
                               with open(rp, "a") as f: f.write("\nvoid seccomp_filter_release(struct task_struct *tsk) {}\n")
                           app_done.add(rp)
 
-          # feature.c ve feature.h içerisindeki su_compat kısıtlamalarını kaldırma
+          # feature.c ve feature.h içerisindeki kısıtlamaları kaldırma
           for kdir in ["drivers/kernelsu", "KernelSU"]:
               if not os.path.exists(kdir): continue
               for root, dirs, files in os.walk(kdir, followlinks=True):
@@ -568,7 +577,7 @@ jobs:
                           print(f"[OK] 4.14 Native Sucompat Motoru sucompat.c içine yazıldı: {rp}")
                           sucomp_done.add(rp)
 
-          # dispatch.c [ksu_driver], Sabit Sürüm ve Hem Prctl Hem Reboot Köprüsü
+          # dispatch.c [ksu_driver], Sabit Sürüm, Kanca Tipi (Manual) ve Yönetici Kaydı
           bridge_code = (
               "\n/* --- SukiSU Protocol Compliant Command, Prctl & Reboot Supercall Bridge --- */\n"
               "#include <linux/fs.h>\n"
@@ -592,6 +601,13 @@ jobs:
               "    u32 sockcreate_sid;\n"
               "};\n\n"
               "static long ksu_native_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
+              "    /* 0x4b ('K') ve cmd 5: KSU_IOC_GET_HOOK_TYPE -> Kesinlikle 2 (Manual Hook) dön */\n"
+              "    if (_IOC_TYPE(cmd) == 0x4b && _IOC_NR(cmd) == 5) {\n"
+              "        int hook_type = 2;\n"
+              "        if (copy_to_user((void __user *)arg, &hook_type, sizeof(hook_type)))\n"
+              "            return -EFAULT;\n"
+              "        return 0;\n"
+              "    }\n"
               "    return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);\n"
               "}\n\n"
               "static const struct file_operations ksu_native_sc_fops = {\n"
@@ -638,8 +654,8 @@ jobs:
               "    }\n\n"
               "    /* 1. Sürüm Talebi: KSU_CMD_GET_VERSION (arg2 == 1) */\n"
               "    if (arg2 == 1) {\n"
-              "        int ksu_ver = 40900;\n"
-              "        int flags = 1; /* 1 = Manual Hook */\n"
+              "        int ksu_ver = 40939;\n"
+              "        int flags = 2; /* 2 = Manual Hook */\n"
               "        if (arg3) {\n"
               "            copy_to_user((void __user *)arg3, &ksu_ver, sizeof(int));\n"
               "        }\n"
@@ -693,6 +709,10 @@ jobs:
               "int ksu_handle_reboot_bridge(int magic1, int magic2, unsigned int cmd, void __user *arg);\n"
               "int ksu_handle_reboot_bridge(int magic1, int magic2, unsigned int cmd, void __user *arg) {\n"
               "    if ((unsigned int)magic1 == 0xdeadbeef && (unsigned int)magic2 == 0xcafebabe) {\n"
+              "        uid_t uid = current_uid().val;\n"
+              "        if (uid >= 10000) {\n"
+              "            ksu_manager_appid = uid % 100000;\n"
+              "        }\n"
               "        int driver_fd = ksu_ensure_driver_fd();\n"
               "        if (arg && (unsigned long)arg > 0x1000) {\n"
               "            copy_to_user(arg, &driver_fd, sizeof(driver_fd));\n"
@@ -793,6 +813,8 @@ jobs:
 
           ./scripts/config --file out/.config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config --disable CONFIG_CC_WERROR
+          ./scripts/config --file out/.config --enable CONFIG_KSU_MANUAL_HOOK
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUCOMPAT
 
           make ARCH=arm64 O=out olddefconfig
 
