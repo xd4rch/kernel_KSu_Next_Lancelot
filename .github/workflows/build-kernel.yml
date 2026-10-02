@@ -294,18 +294,31 @@ jobs:
                           )
                           print(f"[OK] selinux.c doğrudan güncellendi: {real_p}")
 
+                      # do_get_hook_type fonksiyonunu doğrudan 2 (Manual) döndürecek şekilde bağlama
+                      if "do_get_hook_type" in c:
+                          c = re.sub(
+                              r'static\s+int\s+do_get_hook_type\s*\([^)]*\)\s*\{[^}]*\}',
+                              'static int do_get_hook_type(void __user *arg) {\n'
+                              '    u32 hook_type = 2; /* 2 = HOOK_TYPE_MANUAL */\n'
+                              '    return copy_to_user(arg, &hook_type, sizeof(hook_type)) ? -EFAULT : 0;\n'
+                              '}',
+                              c
+                          )
+                          print(f"[OK] do_get_hook_type zorlandı (hook_type = 2): {real_p}")
+
                       if c != orig_c:
                           with open(real_p, "w", encoding="utf-8") as f:
                               f.write(c)
 
-          # Makefile içine doğrudan C derleme bayraklarını ekleme
+          # Kbuild alt dizin bayrakları (tüm alt klasörlere yayılması için subdir-ccflags-y)
           for mfile in ["drivers/kernelsu/Makefile", "KernelSU/kernel/Makefile"]:
               if os.path.exists(mfile):
                   with open(mfile, "r") as f: mc = f.read()
-                  if "CONFIG_KSU_MANUAL_HOOK" not in mc:
+                  if "subdir-ccflags-y" not in mc:
                       with open(mfile, "a") as f:
-                          f.write("\nccflags-y += -DCONFIG_KSU_MANUAL_HOOK=1 -DCONFIG_KSU_SUCOMPAT=1\n")
-                      print(f"[OK] ccflags-y zorlandı: {mfile}")
+                          f.write("\nsubdir-ccflags-y += -DCONFIG_KSU_MANUAL_HOOK=1 -DCONFIG_KSU_SUCOMPAT=1\n")
+                          f.write("ccflags-y += -DCONFIG_KSU_MANUAL_HOOK=1 -DCONFIG_KSU_SUCOMPAT=1\n")
+                      print(f"[OK] subdir-ccflags-y eklendi: {mfile}")
 
           # perm.c sembol tablosu
           perm_code = (
@@ -432,7 +445,7 @@ jobs:
                                   f.write(fc)
                               print(f"[OK] feature desteği açıldı: {fp}")
 
-          # 4.14 Native Working Sucompat Engine (Seçici İzin, Credential Elevation ve Stealth Modu)
+          # 4.14 Native Sucompat Engine + ksu_register_feature_handler ile Feature Tablosu Kaydı
           full_sucompat_engine = (
               "#include <linux/types.h>\n"
               "#include <linux/fs.h>\n"
@@ -454,8 +467,10 @@ jobs:
               "    u32 sockcreate_sid;\n"
               "};\n\n"
               "extern int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);\n"
-              "extern bool ksu_is_allow_uid(uid_t uid) __attribute__((weak));\n\n"
-              "/* 1. Sucompat Özellik Desteği (feature.c ve ksud için tam köprü) */\n"
+              "extern bool ksu_is_allow_uid(uid_t uid) __attribute__((weak));\n"
+              "typedef int (*feature_handler_t)(bool get, void *val);\n"
+              "extern int ksu_register_feature_handler(u32 id, feature_handler_t handler) __attribute__((weak));\n\n"
+              "/* 1. Sucompat Özellik Değişkenleri ve Feature Handler */\n"
               "bool ksu_su_compat_enabled = true;\n"
               "bool ksu_is_su_compat_enabled(void) { return ksu_su_compat_enabled; }\n"
               "bool ksu_sucompat_is_supported(void) { return true; }\n"
@@ -467,8 +482,21 @@ jobs:
               "int ksu_su_compat_set(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
               "int ksu_su_compat_set_status(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
               "int ksu_set_su_compat(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
-              "int ksu_set_su_compat_enabled(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n"
-              "int ksu_sucompat_init(void) { return 0; }\n"
+              "int ksu_set_su_compat_enabled(bool enabled) { ksu_su_compat_enabled = enabled; return 0; }\n\n"
+              "static int su_compat_feature_handler(bool get, void *val) {\n"
+              "    if (get) {\n"
+              "        if (val) *(bool *)val = ksu_su_compat_enabled;\n"
+              "    } else {\n"
+              "        if (val) ksu_su_compat_enabled = *(bool *)val;\n"
+              "    }\n"
+              "    return 0;\n"
+              "}\n\n"
+              "int ksu_sucompat_init(void) {\n"
+              "    if (ksu_register_feature_handler) {\n"
+              "        ksu_register_feature_handler(0, su_compat_feature_handler); /* ID 0 = su_compat */\n"
+              "    }\n"
+              "    return 0;\n"
+              "}\n"
               "void ksu_sucompat_exit(void) {}\n\n"
               "/* 2. Çağıran Sürecin İzin Kontrolü */\n"
               "static inline bool ksu_is_caller_allowed(uid_t uid) {\n"
@@ -601,9 +629,9 @@ jobs:
               "    u32 sockcreate_sid;\n"
               "};\n\n"
               "static long ksu_native_sc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {\n"
-              "    /* 0x4b ('K') ve cmd 5: KSU_IOC_GET_HOOK_TYPE -> Kesinlikle 2 (Manual Hook) dön */\n"
+              "    /* 0x4b ('K') ve cmd 5: KSU_IOC_GET_HOOK_TYPE -> 2 (Manual Hook) */\n"
               "    if (_IOC_TYPE(cmd) == 0x4b && _IOC_NR(cmd) == 5) {\n"
-              "        int hook_type = 2;\n"
+              "        u32 hook_type = 2;\n"
               "        if (copy_to_user((void __user *)arg, &hook_type, sizeof(hook_type)))\n"
               "            return -EFAULT;\n"
               "        return 0;\n"
@@ -654,7 +682,7 @@ jobs:
               "    }\n\n"
               "    /* 1. Sürüm Talebi: KSU_CMD_GET_VERSION (arg2 == 1) */\n"
               "    if (arg2 == 1) {\n"
-              "        int ksu_ver = 40939;\n"
+              "        int ksu_ver = 40940;\n"
               "        int flags = 2; /* 2 = Manual Hook */\n"
               "        if (arg3) {\n"
               "            copy_to_user((void __user *)arg3, &ksu_ver, sizeof(int));\n"
